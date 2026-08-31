@@ -47,6 +47,24 @@ export function startDevTrace(getAudio, state, physics) {
   const rough = new Float32Array(N);    // dB of level modulation over the last 0.5 s
   const tick = new Float32Array(N);      // worst engine tick interval, ms
   const stall = new Uint16Array(N);      // running count of late ticks
+  // THE THREAD NOTHING HERE COULD SEE.
+  //
+  // Everything above watches the MAIN thread. The owner reports the sound
+  // snatching exactly when the car has to draw the Autopilot visualisation,
+  // and that is a claim about the AUDIO thread, which no field in this
+  // recorder has ever measured. Two mechanisms produce the same symptom and
+  // need opposite fixes:
+  //
+  //   audio thread starved  -> the context cannot render in real time.
+  //                            Nothing about the model is wrong; there is not
+  //                            enough CPU. Fix = make the graph cheaper.
+  //   main thread starved   -> the tick is late, the model lurches when it
+  //                            resumes. Fix = rate limits and longer ramps.
+  //
+  // `tick` already names the second. These two name the first, so the next
+  // drive settles it instead of another round of theories.
+  const audLoad = new Float32Array(N);   // renderCapacity, % of one quantum budget
+  const audLag = new Float32Array(N);    // ms the audio clock lost to the wall clock
   const STATES = ['idle', 'cruise', 'pull', 'overrun', 'shift'];
 
   // The owner cannot watch numbers: driving takes 80-85% of his attention, so
@@ -68,6 +86,40 @@ export function startDevTrace(getAudio, state, physics) {
   let i = 0;
   let wrapped = false;
   const t0 = performance.now();
+
+  // Chromium hands out the render thread's own load figure; the Tesla browser
+  // is Chromium, so this is the direct reading where it exists. Attached to
+  // whichever context is live, and re-attached when the engine is swapped.
+  let capCtx = null;
+  let capLoad = -1;
+  const attachCapacity = (ctx) => {
+    if (!ctx || ctx === capCtx) return;
+    capCtx = ctx;
+    capLoad = -1;
+    const rc = ctx.renderCapacity;
+    if (!rc || typeof rc.start !== 'function') return;   // not Chromium, or too old
+    try {
+      // addEventListener, NOT onupdate. dev-perf.js watches the same object
+      // through `rc.onupdate =`, and that is one slot: whichever of the two
+      // attached last would have silently blanked the other's reading. Both
+      // are on screen at the same time in dev mode, so one of them would have
+      // been quietly wrong. The interval matches dev-perf's for the same
+      // reason -- start() is shared state, and the later call wins.
+      rc.addEventListener('update', (e) => { capLoad = e.averageLoad * 100; });
+      rc.start({ updateInterval: 1 });
+    } catch (_) { /* diagnostic only; the clock check below still works */ }
+  };
+
+  // The portable half, and the one that cannot be argued with: the audio clock
+  // is driven by the device's own output. If half a second of wall time only
+  // advanced it by 0.4 s, the context missed 100 ms of audio -- which is a
+  // dropout, whatever the browser is willing to admit. Measured over a window,
+  // because currentTime advances a render quantum at a time and comparing two
+  // adjacent 20 ms samples reads mostly quantisation.
+  const LAG_WINDOW_MS = 500;
+  let lagWall = 0;
+  let lagAudio = 0;
+  let lagMs = 0;
 
   const played = (a) => {
     try {
@@ -113,6 +165,23 @@ export function startDevTrace(getAudio, state, physics) {
     tick[i] = a._tickWorstMs || 0;
     stall[i] = Math.min(65535, a._tickStalls || 0);
     if (a._tickWorstMs != null) a._tickWorstMs = 0;   // peak-hold, read and reset
+    // Audio thread. Peak-held across the window like `tick`, so a single
+    // missed block cannot be averaged away by the samples either side of it.
+    const ctx = a.ctx;
+    if (ctx) {
+      attachCapacity(ctx);
+      const wallNow = performance.now();
+      if (!lagWall) { lagWall = wallNow; lagAudio = ctx.currentTime; }
+      const dWallMs = wallNow - lagWall;
+      if (dWallMs >= LAG_WINDOW_MS) {
+        const dAudioMs = (ctx.currentTime - lagAudio) * 1000;
+        lagMs = ctx.state === 'running' ? Math.max(0, dWallMs - dAudioMs) : 0;
+        lagWall = wallNow;
+        lagAudio = ctx.currentTime;
+      }
+    }
+    audLoad[i] = capLoad;
+    audLag[i] = lagMs;
     rms[i] = r;
     // modulation depth over the last half second
     const back = Math.min(HZ >> 1, wrapped ? N : i);
@@ -130,7 +199,13 @@ export function startDevTrace(getAudio, state, physics) {
     const prevK = (i - 1 + N) % N;
     const dPitchNow = (pitch[i] > 1e-4 && pitch[prevK] > 1e-4)
       ? Math.abs(12 * Math.log2(pitch[i] / pitch[prevK])) : 0;
-    const score = rough[i] + dPitchNow * 3 + Math.max(0, (tick[i] - 40) / 10);
+    // The audio thread gets a vote too. Below ~20 ms lost in half a second the
+    // reading is quantisation and scheduler slop, so it contributes nothing;
+    // above it, a moment the context could not render is worth keeping even if
+    // the level and the pitch both looked fine, because that is precisely the
+    // failure the other three terms are blind to.
+    const score = rough[i] + dPitchNow * 3 + Math.max(0, (tick[i] - 40) / 10)
+      + Math.max(0, (audLag[i] - 20) / 5);
     const nowS = t[i] / 1000;
     // The engine start outscores everything that follows — the first run of
     // this filled the top two slots with it and squeezed the actual drive out.
@@ -301,6 +376,13 @@ export function startDevTrace(getAudio, state, physics) {
         lastStartAgoS: (au && au.constructor && au.constructor.lastStartAt)
           ? Math.round((Date.now() - au.constructor.lastStartAt) / 1000) : null,
         ctxState: ac ? ac.state : null,
+        // Which perf tier the engine picked for itself. It is decided ONCE, at
+        // start(), from the user agent and the core count -- so if the car is
+        // reading 'full' then it opened its context with latencyHint
+        // 'interactive', which is the smallest output buffer the device will
+        // give and the first thing to underrun when the MCU is busy drawing.
+        // baseLatencyMs beside it is the buffer that actually resulted.
+        perfTier: au && au._lite != null ? (au._lite ? 'lite' : 'full') : null,
       };
       const body = {
         access_key: 'b0c38acf-3953-4910-9fbb-290ad09af3a5',
@@ -316,6 +398,15 @@ export function startDevTrace(getAudio, state, physics) {
         inputs: JSON.stringify(
           (window.TAS && window.TAS.manual && window.TAS.manual.inputLog)
             ? window.TAS.manual.inputLog() : []),
+        // The same question asked one layer lower. manual-shift can only count
+        // what reaches ITS listener; this is counted at window-capture, ahead
+        // of every handler on the page, against window-bubble behind them all.
+        // arrived 0 means the car never sent it and none of this is our bug;
+        // arrived > survived means something here is eating it. See
+        // js/dev-input.js.
+        rawInputs: JSON.stringify(
+          (window.TAS && window.TAS.input && window.TAS.input.snapshot)
+            ? window.TAS.input.snapshot() : []),
         // Always. He taps just after hearing it, so this is the evidence;
         // the ranked list is context.
         tail: JSON.stringify(api.tail(6)),
@@ -375,6 +466,7 @@ export function startDevTrace(getAudio, state, physics) {
         rpm: Math.round(rpm[k]), g: gear[k], dyn: +dyn[k].toFixed(3),
         hz: +pitch[k].toFixed(2), s: STATES[st[k]], rough: +rough[k].toFixed(1),
         tick: +tick[k].toFixed(0),
+        aud: +audLoad[k].toFixed(0), lag: +audLag[k].toFixed(0),
         fix: +fixHz[k].toFixed(1),
       }));
       return {
@@ -384,6 +476,8 @@ export function startDevTrace(getAudio, state, physics) {
         roughMax: rs.length ? +rs[rs.length - 1].toFixed(1) : 0,
         tickWorstMs: +Math.max(...slice.map((k) => tick[k])).toFixed(0),
         tickStalls: slice.length ? stall[slice[slice.length - 1]] - stall[slice[0]] : 0,
+        audLoadMax: +Math.max(...slice.map((k) => audLoad[k])).toFixed(0),
+        audLagMaxMs: +Math.max(...slice.map((k) => audLag[k])).toFixed(0),
         speedFrom: rows[0].v, speedTo: rows[rows.length - 1].v,
         gears: [...new Set(rows.map((r) => r.g))],
         states: [...new Set(rows.map((r) => r.s))],
@@ -413,7 +507,12 @@ export function startDevTrace(getAudio, state, physics) {
         ? `caught ${w.length} · worst ${top.score} @${top.atS}s · `
         : 'caught 0 · ';
       const tl = api.tail(6);
-      const tail = tl ? `tick ${tl.tickWorstMs}ms/${tl.tickStalls} · ` : '';
+      // `aud` is the audio thread's own load where the browser reports it, and
+      // `lag` is the audio it failed to produce. lag 0 means the snatch is NOT
+      // the render thread and the tick number beside it is where to look.
+      const tail = tl
+        ? `tick ${tl.tickWorstMs}ms/${tl.tickStalls} · aud ${tl.audLoadMax < 0 ? '?' : tl.audLoadMax + '%'}/lag ${tl.audLagMaxMs}ms · `
+        : '';
       return caught + tail + `${s.seconds}s · rough ${s.roughP95}/${s.roughMax}dB · gain ${s.gainJumps} · ` +
              `pitch ${s.pitchJumps} · flip ${s.accelSignFlips} · gear ${s.gearChanges}`;
     },

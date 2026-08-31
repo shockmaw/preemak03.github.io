@@ -599,14 +599,11 @@ async function init() {
       if (vis.length && !vis.some((p) => p.id === state.profileId)) selectProfile(vis[0].id);
     }
     renderCarousel(); // dev-only cards appear / disappear immediately
-    // The on-screen throttle is dev-only too, and it used to be decided once
-    // when the harness mounted — so it did not appear until a reload, and did
-    // not go away until another one.
-    if (window.TAS.manual && window.TAS.manual.setPedal) window.TAS.manual.setPedal(on);
     // Start and stop for real. Leaving these running after dev is switched off
-    // is a cost the user never asked for and cannot see.
-    if (on) window.TAS.startDevTools();
-    else window.TAS.stopDevTools();
+    // is a cost the user never asked for and cannot see — and in the gearbox's
+    // case it would leave the car in a manual it can no longer shift.
+    if (on) { window.TAS.startDevTools(); window.TAS.startManual(); }
+    else { window.TAS.stopDevTools(); window.TAS.stopManual(); }
   };
 
   // Debounce the sheet-open by 1s with a spinner ring around the button, so it reads as
@@ -662,34 +659,41 @@ async function init() {
     } catch (_) {}
   })();
 
-  // Dev perf readout — only in Dev mode, loaded on demand. If it fails to load
-  // the app is unaffected; it is a diagnostic, not a feature.
-  // Manual gearbox. Dev-mode only until it has been driven — it changes where
-  // the revs come from, and LAW 7 says a drive decides that, not a bench.
-  // DEV TOOLS — started and STOPPED together.
+  // MANUAL GEARBOX — Dev mode only, again.
   //
-  // These were only ever started. Turning dev mode off toggled a class and
-  // re-rendered the carousel and left everything else running: the drive
-  // recorder still sampling at 50 Hz and reading 2048 analyser samples each
-  // time, the pedal's animation frame loop still spinning, and the paddles,
-  // gear readout and throttle still on screen because none of them carried the
-  // dev-only class. Enable dev once and the cost stayed for the rest of the
-  // session — on a car that is sometimes smooth and sometimes not, that is
-  // exactly the kind of thing to rule out first.
-  // MANUAL GEARBOX — everyone, not just dev.
+  // It shipped to everyone for a while and is going back behind dev until it
+  // has been driven enough to trust. Manual is not a skin on the automatic: it
+  // changes where the revs COME FROM (rpm = speed x ratio instead of
+  // rpm = f(acceleration)), which is a different axis, not a different tuning,
+  // and it carries its own dynamic-volume model with it. LAW 7 says a drive
+  // decides that, not a bench.
   //
-  // The paddles are the feature. The on-screen throttle is not: it drives the
-  // SIMULATOR, so in a real car it would be a button that lies about what the
-  // car is doing. That one stays behind dev mode.
-  import('./manual-shift.js')
-    .then((m) => {
-      window.TAS.manual = m.startManualShift({
+  // STARTED AND STOPPED TOGETHER, like the dev tools beside it. Before, this
+  // was started once at boot and never taken down, so turning dev mode off
+  // left the wheel/key/blur listeners bound, the pedal's animation frame loop
+  // spinning, the paddles and gear readout on screen, and — worst of the four
+  // — the gearbox still ENGAGED in manual, so the revs kept coming off the
+  // ratio for a user who had no way left to change gear. destroy() calls
+  // releaseManual(), which is what hands the car back to the automatic.
+  //
+  // The on-screen throttle rides along: it drives the SIMULATOR, so in a real
+  // car it is a button that lies about what the car is doing. Dev only, which
+  // is now the only place any of this exists.
+  let manual = null;
+
+  async function startManual() {
+    if (manual) return;
+    try {
+      const m = await import('./manual-shift.js');
+      // Dev could have been switched off again while the import was in flight.
+      if (!document.body.classList.contains('dev-mode')) return;
+      manual = m.startManualShift({
         getGear: () => (audio && (audio.gearIndex || audio._gear)) || 1,
         // No toast. Shifting quickly stacks them until they cover half the
         // screen, and they were saying what the readout already says —
         // the gear number is on screen the whole time, next to the paddles.
         onGearChange: null,
-        pedal: document.body.classList.contains('dev-mode'),
+        pedal: true,
         sim: {
           state,
           physics,
@@ -700,8 +704,21 @@ async function init() {
             || 7000,
         },
       });
-    })
-    .catch(() => {});
+      window.TAS.manual = manual;
+    } catch (_) { /* a missing manual gearbox must not take the app down */ }
+  }
+
+  function stopManual() {
+    if (!manual) return;
+    try { manual.destroy(); } catch (_) {}
+    manual = null;
+    window.TAS.manual = null;
+  }
+  window.TAS.startManual = startManual;
+  window.TAS.stopManual = stopManual;
+  window.TAS.manualLive = () => !!manual;
+
+  if (document.body.classList.contains('dev-mode')) startManual();
 
   let devTools = null;
 
@@ -711,34 +728,40 @@ async function init() {
    * appear on screen for reading back.
    */
   function wireTraceTap(el) {
-    el.style.cursor = 'pointer';
-    el.style.padding = '6px 10px';
-    el.style.margin = '-6px -10px';
-    el.style.borderRadius = '8px';
-    el.style.border = '1px solid currentColor';
-    el.style.opacity = '0.85';
     el.title = 'แตะเพื่อส่ง trace การขับ';
     let busy = false;
     el.addEventListener('click', async () => {
       if (busy || !window.TAS.trace) return;
       busy = true;
-      el.textContent = 'ส่ง trace…';
+      el.classList.add('busy');
+      el.textContent = 'ส่ง…';
       try {
         window.TAS.trace.mark('tapped');
         const v = window.TAS.trace.verdict();
         const r = await window.TAS.trace.send('tapped from the car').catch(() => ({ ok: false }));
-        el.textContent = (r.ok ? '✓ ' : '✗ ') + v;
+        // The verdict used to be written back into this element, which was
+        // 8 px tall and one line long — unreadable in a moving car, and
+        // there is nothing to scroll it with. The button now says only
+        // whether it went; the sentence goes to the readout, which is sized
+        // to be read.
+        el.textContent = r.ok ? '✓ ส่งแล้ว' : '✗ ไม่สำเร็จ';
+        el.classList.toggle('ok', !!r.ok);
+        showToast(v, 20000);
       } catch (_) {
-        el.textContent = 'ส่งไม่สำเร็จ';
+        el.textContent = '✗ ไม่สำเร็จ';
       }
-      // 25 s, not 4: this is meant to be read and repeated back.
-      window.setTimeout(() => { el.textContent = 'trace'; busy = false; }, 25000);
+      el.classList.remove('busy');
+      window.setTimeout(() => {
+        el.textContent = 'TRACE';
+        el.classList.remove('ok');
+        busy = false;
+      }, 20000);
     });
   }
 
   async function startDevTools() {
     if (devTools) return;
-    devTools = { trace: null, perf: null, traceEl: null, profile: null };
+    devTools = { trace: null, perf: null, traceEl: null, profile: null, input: null };
 
     try {
       const m = await import('./dev-perf.js');
@@ -750,17 +773,47 @@ async function init() {
       const m = await import('./dev-trace.js');
       devTools.trace = m.startDevTrace(() => audio, state, physics);
       window.TAS.trace = devTools.trace;
-      // Its OWN element: dev-perf rewrites #app-perf every animation frame,
-      // so anything written there is gone before it can be read.
+      // Its OWN row: dev-perf rewrites #app-perf every animation frame, so
+      // anything written there is gone before it can be read.
+      //
+      // SIZED FOR A CAR, not for a desk. These were 8 px text in the brand
+      // badge with a 6 px pad — a target about 20 px tall, on a touchscreen,
+      // to be hit by someone whose attention is 80-85% on the road. They live
+      // in the brand row deliberately, because .drive-lock does not reach it
+      // and these are exactly the controls that matter while moving.
       const host = $('#app-perf');
       if (host && host.parentNode) {
-        const el = document.createElement('span');
-        el.id = 'app-trace';
-        el.className = 'brand-build dev-only';
-        el.textContent = 'trace';
-        host.parentNode.insertBefore(el, host.nextSibling);
-        devTools.traceEl = el;
-        wireTraceTap(el);
+        const bar = document.createElement('div');
+        bar.className = 'dev-actions dev-only';
+        const mk = (id, label) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.id = id;
+          b.className = 'dev-action';
+          b.textContent = label;
+          bar.appendChild(b);
+          return b;
+        };
+        const traceBtn = mk('app-trace', 'TRACE');
+        const inputBtn = mk('app-input', 'INPUT');
+        host.parentNode.insertBefore(bar, host.nextSibling);
+        devTools.traceEl = bar;
+        wireTraceTap(traceBtn);
+
+        // INPUT — what actually reaches the page. Separate from trace on
+        // purpose: trace is a report that arrives by mail after the drive,
+        // and "why can't I scroll" is a question you answer by turning the
+        // control and watching the number move.
+        try {
+          const di = await import('./dev-input.js');
+          devTools.input = di.startDevInput({ getState: () => state });
+          window.TAS.input = devTools.input;
+          inputBtn.addEventListener('click', () => {
+            inputBtn.classList.toggle('on', devTools.input.toggle());
+          });
+        } catch (_) {
+          inputBtn.disabled = true;
+        }
       }
     } catch (_) { /* ignore */ }
 
@@ -779,6 +832,8 @@ async function init() {
     try { if (devTools.perf) devTools.perf(); } catch (_) {}
     try { if (devTools.trace) devTools.trace.stop(); } catch (_) {}
     try { if (devTools.traceEl) devTools.traceEl.remove(); } catch (_) {}
+    try { if (devTools.input) devTools.input.stop(); } catch (_) {}
+    window.TAS.input = null;
     try { if (devTools.profile) devTools.profile.stop(); } catch (_) {}
     window.TAS.profile = null;
     window.TAS.trace = null;

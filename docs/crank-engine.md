@@ -482,3 +482,73 @@ B58   I6 turbo      glide 0.032/0.085s  rise  7700 rpm/s   boost 1900→3950 @1.
    เทอร์โบให้ใส่ `boostBar` ของจริงด้วย
 2. `node vessel/tools/build-crank.mjs` — จะพิมพ์ค่าที่ derive ให้ดูว่าสมเหตุสมผลไหม
 3. เติม id ใน `js/crank-rigs.js`, การ์ดใน `js/profiles.js`, และ precache/ship list
+
+## Step guards — 2026-08-31
+
+Two ceilings on what the engine may deliver, independent of anything the drive
+model believes. Both work on the value actually being pushed, so they catch a
+defect that has not been found yet as readily as the ones that have. **CRANK
+only** — no other engine is touched.
+
+| | base | during a gear change |
+|---|---|---|
+| pitch | 52 st/s | 130 st/s (or `shiftFallStPerSec` x1.2, whichever is larger) |
+| level | 220 dB/s | 320 dB/s |
+
+### The gear-change exception, and why it was needed
+
+`_shiftGuardEndAt` opens a 0.5 s window where `_shifting` is set — the path
+**automatic and manual share**; `isManual()` below it only picks the rev target.
+`_inShift()` is the union of that window and every other shift deadline.
+
+Without it the guard was cutting real gear changes:
+
+- The pitch ceiling stood at **52 st/s while the profile asks for
+  `shiftFallStPerSec: 60`** — the backstop was silently overriding the tune.
+- The window the engine already had was too SHORT. Driven through a manual
+  upshift into 5th, the fastest pitch move of the whole drive — **95 st/s** —
+  lands at **+245 ms**, with `_shifting` already false and the glide hold
+  expired. Manual is worse: `_shiftLandEndAt` sits under `if (!isManual())` and
+  so is never set there at all.
+- Measured demand during a change: 93 st/s (jz manual), **108 st/s (civic
+  manual)**. The old ceiling chopped both roughly in half.
+
+### What each guard is worth, measured
+
+Engine start, the crank-to-catch handover at t=0.7 — the moment named in the
+report:
+
+| card | guards off | guards on |
+|---|---|---|
+| jz-crank | 133 st/s | **70** |
+| civic-crank | 205 st/s | **72** |
+
+Clean drives, both cards, both modes: **`capHits` 0** — the guard never touches
+a legitimate drive. Inject a rev teleport and it bites immediately (8 hits
+automatic, 18 manual). `offline-bench.compare` against both ceilings disabled:
+every phase `noise`, clip 0/0, crest identical to two significant figures.
+
+### Why the level ceiling is loose, which is not what was asked for
+
+The brief was the tightest guard that does not break the sound. Measuring what
+the engine legitimately DEMANDS says a tight one is not available:
+
+| gain | auto | manual | civic |
+|---|---|---|---|
+| exhaust | 36 | **171** | 40 |
+| intake | 48 | 48 | 57 |
+| dyn | 49 | 44 | 48 |
+| turbo | 139 | 70 | **341** |
+| whistle | 130 | 65 | **283** |
+
+171 dB/s is one tick moving 3.6 dB and it is a driver shutting the throttle. A
+cap under it removes the lift, not a glitch. turbo/whistle/delayGain are
+excluded outright: they live near zero and open from there, so their rate in dB
+is an arithmetic artefact of a tiny absolute level, and the move is the spool
+and the VTEC crossover doing their job. The VTEC duck, the starter envelope and
+the overrun pops are excluded too — events, not levels.
+
+**The level was never where the snatch was.** Simulated tick starvation moves
+it by under 1 dB (`vessel/tools/crank-stall-bench.js`). The level ceiling is
+insurance against a discontinuity nobody has produced yet; the pitch ceiling
+and its gear-change exception are the parts doing real work.

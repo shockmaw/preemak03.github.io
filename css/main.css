@@ -1897,3 +1897,137 @@ body:not(.dev-mode) .dev-only {
 .speed-ring.at-redline .speed-value {
   text-shadow: 0 0 44px rgba(255, 90, 90, 0.45);
 }
+
+/* --------------------------------------------------------------------------
+   Dev action bar + input probe  (dev mode only)
+
+   Deliberately NOT inside .drive-lock's reach. These are the two controls that
+   only mean anything while the car is actually moving, which is exactly when
+   the lock disables everything else.
+
+   Sized for a CAR TOUCHSCREEN. The trace control used to be 8 px text with a
+   6 px pad — about a 20 px target — to be hit by someone whose attention is
+   80-85% on the road. 52 px tall is the minimum that is honestly tappable
+   without looking, and these sit in the top-left corner where the hand
+   naturally lands.
+   -------------------------------------------------------------------------- */
+.dev-actions {
+  flex-basis: 100%;
+  margin-left: 34px;
+  margin-top: 4px;
+  display: flex;
+  gap: 10px;
+}
+
+.dev-action {
+  min-width: 104px;
+  min-height: 52px;
+  padding: 0 18px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border-subtle);
+  background: rgba(127, 127, 127, 0.1);
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  /* A mis-tap that selects the label instead of pressing the button is the
+     same as a miss, and harder to notice. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.2s, border-color 0.2s, transform 0.1s;
+}
+.dev-action:active { transform: scale(0.96); }
+.dev-action.on { color: var(--accent); border-color: var(--accent); }
+.dev-action.ok { color: #7ee0c0; border-color: #7ee0c0; }
+.dev-action.busy { opacity: 0.6; }
+.dev-action[disabled] { opacity: 0.35; cursor: default; }
+
+/* The readout. Large type and no scrolling on purpose: the previous answer was
+   one long line inside an 8 px badge, and there is nothing to scroll it with in
+   a moving car. Everything worth reading has to fit. */
+.dev-input-panel {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 90;
+  padding: 14px 16px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(10, 12, 15, 0.94);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+.dev-input-panel[hidden] { display: none; }
+
+.dip-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.dip-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+.dip-btn {
+  min-width: 76px;
+  min-height: 48px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border-subtle);
+  background: rgba(127, 127, 127, 0.12);
+  color: var(--text-muted);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.dip-btn:active { transform: scale(0.96); }
+
+.dip-legend {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-bottom: 8px;
+}
+
+.dip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 17px;
+  line-height: 1.35;
+}
+.dip-k { flex: 0 0 118px; font-weight: 600; }
+.dip-n { flex: 0 0 54px; text-align: right; font-weight: 700; color: var(--text); }
+.dip-d { flex: 0 0 76px; opacity: 0.75; }
+.dip-t { flex: 1; text-align: right; opacity: 0.6; font-size: 14px; }
+
+/* arrived > survived: something on this page is eating it. That is the row
+   worth finding, so it is the one that is coloured. */
+.dip-row.eaten { color: #ff6b6b; }
+.dip-row.eaten .dip-n { color: #ff6b6b; }
+
+.dip-silent {
+  font-size: 13px;
+  opacity: 0.55;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.dip-quiet { flex: 1; }
+
+.dip-drive {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}

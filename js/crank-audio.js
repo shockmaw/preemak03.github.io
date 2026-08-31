@@ -206,6 +206,96 @@ const DEFAULT_BOOST = {
 };
 
 /** d(semitones)/dt = ST x (drpm/dt) / rpm — converts a rev rate into a pitch rate. */
+/**
+ * LEVEL STEP CEILING — the amplitude twin of FREQ_CEIL_ST_PER_SEC in _tick().
+ *
+ * The pitch has had a hard slew backstop for a while: whatever the model asks
+ * for, the frequency actually played may not move faster than 52 st/s. The
+ * LEVEL never had one. Every gain in the tick was written straight to
+ * setTargetAtTime with a 30 ms time constant, so any step the model produced
+ * -- a stalled tick catching up, a load that jumped 0.24 to 0.78 between two
+ * ticks, the crank-to-catch handover which alone is +18 dB in one tick -- was
+ * delivered to the ear in about 30 ms. That is not a fade. Roughly 20 dB in a
+ * thirtieth of a second is the pull of a needle across a record, which is
+ * exactly the artefact this exists to make impossible.
+ *
+ * dB per second, and it is a CEILING, not a tuning. Nothing here decides how
+ * loud anything is; it only decides how fast loud is allowed to become quiet
+ * and back. See _atSlew() for why it caps elapsed time as well as rate.
+ *
+ * WHY IT IS THIS LOOSE, WHICH IS NOT WHAT WAS WANTED
+ *   The brief was the tightest guard that does not break the sound. The first
+ *   cut was 96 dB/s, and measuring what the engine legitimately DEMANDS -- the
+ *   ceiling disabled, driven through an automatic pull, a manual drive with
+ *   five changes, and both cards -- says 96 would have broken it:
+ *
+ *     exhaust  36 dB/s automatic ... 171 in manual, on the lift into a change
+ *     intake   48 ... 57
+ *     dyn      44 ... 49
+ *
+ *   171 dB/s is one tick moving 3.6 dB, and it is a driver shutting the
+ *   throttle. A cap under it does not remove a glitch, it removes the lift.
+ *   So the ceiling sits above every legitimate move measured, with margin, and
+ *   is what it claims to be: a backstop against a discontinuity, not a
+ *   smoother. A genuine step -- 10 dB inside one 20 ms tick -- is 500 dB/s and
+ *   is still caught, by a factor of more than two.
+ *
+ *   The honest reading of the sweep is that a TIGHT level guard is not
+ *   available on this engine, because the sound's own dynamics live in the
+ *   same range as the artefact. Measured: tick starvation moves the level by
+ *   under 1 dB. The level was never where the snatch was.
+ *
+ * Sized by vessel/tools/crank-stall-bench.js and the demand probe beside it.
+ */
+const LEVEL_CEIL_DB_PER_SEC = 220;
+
+/**
+ * Below this the guard steps aside. Two reasons, both real: dB of a number
+ * approaching zero runs to minus infinity, so a rate limit expressed in dB
+ * would take forever to reach silence from anywhere; and at -60 dBFS against
+ * an engine sitting near 0 dB, nothing that happens is audible anyway. The
+ * turbo and whistle gains live down here whenever the engine is off boost,
+ * and they must stay free to open from nothing.
+ */
+const LEVEL_FLOOR = 1e-3;
+
+/**
+ * THE GEAR-CHANGE EXCEPTION.
+ *
+ * A ceiling that cannot tell a glitch from a driver changing gear will sooner
+ * or later chop a real gear change, and that is measurably what was happening:
+ * the profile asks for shiftFallStPerSec 60 while the pitch ceiling stood at
+ * 52, so the tune's own shift rate was being overridden by the safety net —
+ * LAW 1 quietly lost to a const.
+ *
+ * Worse, the window the engine already had was too SHORT. `_shifting` lasts
+ * 0.12 s and glideHoldSec 0.2 s, but the rev transition is still moving after
+ * that: driven through a scripted manual upshift into 5th, the single fastest
+ * pitch move of the entire drive — 95 st/s — lands at +245 ms, with `_shifting`
+ * already false and the glide hold already expired. Manual is worse again,
+ * because `_shiftLandEndAt` is set under `if (!isManual())` and so is never set
+ * in manual at all.
+ *
+ * So the guard gets its own window, opened where `_shifting` is set — which is
+ * the path BOTH modes go through — and long enough to outlast the transition
+ * in either. It is deliberately generous: too long only means the backstop is
+ * looser for half a second after a shift, while too short means cutting the
+ * gear change the owner asked for.
+ */
+const SHIFT_GUARD_SEC = 0.5;
+
+/**
+ * What a gear change is allowed to do, measured rather than chosen.
+ *
+ * Both ceilings disabled, driven through five manual changes and a full
+ * automatic run to 130, the legitimate demand inside a change is 95 st/s and
+ * 168 dB/s. These sit above that with margin, and still far below the failures
+ * they exist to catch: the gear-change rev teleport this engine shipped with
+ * measured -568 st/s in automatic and -1013 st/s in manual.
+ */
+const SHIFT_FREQ_CEIL_ST_PER_SEC = 130;
+const SHIFT_LEVEL_CEIL_DB_PER_SEC = 320;
+
 const ST = 12 / Math.LN2;
 
 /** km/h/s. Below this the acceleration reading is scatter (classic parity). */
@@ -375,20 +465,45 @@ export class CrankAudio {
     this._rpmDisplay = null;
     this._paramTick = 0;
     this._lastParam = new WeakMap();
+    // Per-parameter { v, t } for the level ceiling. WeakMap so a rebuilt graph
+    // does not keep the old nodes alive.
+    this._levelSlew = new WeakMap();
+    // Bench hook. The ceiling is a safety backstop rather than tune, so it does
+    // not belong in the profile JSON (LAW 1) -- but it does have to be
+    // sweepable, or the number in it is just a story. null = use the const.
+    this._levelCeilDbPerSec = null;
+    // Same hook for the pitch ceiling, so both can be swept rather than argued.
+    this._freqCeilStPerSec = null;
+    this._freqReqHz = null;
+    this._freqCapped = false;
     this._holdRpm = null;
+    // Hard ceiling on played frequency: the last hz actually pushed and the
+    // audio-clock time it was pushed at. See the _setParam(oscL.frequency...)
+    // call site for why this exists.
+    this._lastFreqHz = null;
+    this._lastFreqAt = 0;
 
-    // Shift / crank phases
+    // Shift / crank phases. The four *EndAt fields are ctx.currentTime
+    // deadlines (same convention as _crankUntil/_revUntil below), not
+    // per-tick countdowns — a stalled main thread that skips ticks cannot
+    // leave one of these pinned open past its real-time window, because the
+    // deadline is just a fixed point on the audio clock, not accumulated
+    // state that needs servicing every tick.
     this._shifting = false;
-    this._shiftTimer = 0;
+    this._shiftEndAt = 0;
     this._shiftLand = null;   // rpm the change is heading for
-    this._shiftLandT = 0;     // how long that target still applies
+    this._shiftLandEndAt = 0; // ctx.currentTime when the landing pin releases
     this._shiftUp = false;
     this._sinceShift = 0;
-    this._postShift = 0;
+    this._postShiftEndAt = 0;
     this._crankUntil = 0;      // starter phase end (audio clock)
     this._popCooldown = 0;
     this._overrunLatch = false;   // hysteresis, so cruise<->overrun cannot flutter
-    this._glideHold = 0;       // seconds left of the slow pitch glide after a shift
+    this._glideHoldEndAt = 0;  // ctx.currentTime when the slow post-shift glide ends
+    // ctx.currentTime until which BOTH step ceilings run at their gear-change
+    // values. Wider than every other shift deadline on purpose — see
+    // SHIFT_GUARD_SEC. Set in the shared path, so auto and manual both get it.
+    this._shiftGuardEndAt = 0;
 
     // Launch Rev
     this._revUntil = 0;
@@ -409,6 +524,10 @@ export class CrankAudio {
     this._nodes = null;
     this._voices = null;
     this._active = 'a';
+    // ctx.currentTime at which the voice that just faded OUT may leave the
+    // graph, and which one it is. See the park note in _buildGraph.
+    this._parkAt = 0;
+    this._parkKey = null;
     this._waves = null;
     this._vtecWaves = null;
     this._timer = null;
@@ -529,13 +648,25 @@ export class CrankAudio {
     this.setBass(this._bass);   // re-applies trim with the bass compensation
 
     const nextKey = this._active === 'a' ? 'b' : 'a';
-    const cur = this._voices[this._active];
+    const curKey = this._active;
+    const cur = this._voices[curKey];
     const next = this._voices[nextKey];
     this._applyWaves(next, this._waves);
     next.shape.curve = raspCurve(this._spec.rasp);
     const t = this.ctx.currentTime;
+    // Back into the graph before it is faded up, or the crossfade would rise
+    // into a voice nothing is pulling. Connecting a second time is a no-op in
+    // WebAudio, so flicking through the carousel cannot stack connections.
+    this._unparkVoice(nextKey);
     at(cur.voiceGain.gain, 0, t, 0.06);
     at(next.voiceGain.gain, 1, t, 0.06);
+    // Leave the old one rendering until the fade is actually finished.
+    // setTargetAtTime is asymptotic: 0.5 s is a little over eight time
+    // constants, which puts it at -72 dB before it is cut. Parked from the
+    // tick rather than a timer -- the tick is the only clock here that a
+    // stalled main thread cannot fire out of order.
+    this._parkKey = curKey;
+    this._parkAt = t + 0.5;
     this._active = nextKey;
     if (this._rpm > this._spec.redlineRpm) this._rpm = this._spec.redlineRpm * 0.92;
   }
@@ -757,11 +888,65 @@ export class CrankAudio {
    * A change smaller than `eps` is inaudible, so sending it buys nothing and
    * costs one automation event per parameter per tick.
    */
+  /**
+   * Write a GAIN through the level ceiling.
+   *
+   * Same shape as the pitch backstop, and for the same reason: it works on the
+   * value actually being pushed, not on anything the model believes, so it
+   * catches a glitch that has not been found yet as readily as the ones that
+   * have.
+   *
+   * dtReal is capped at three ordinary ticks. Without that cap a long stall
+   * "banks" a proportionally large allowance -- legitimate by a time-averaged
+   * rate, and then spent all at once the moment the tick resumes, which sounds
+   * identical to the step it was supposed to prevent. Capping elapsed time
+   * makes this a true slew limit on the signal rather than a budget.
+   */
+  /**
+   * Is a gear change in flight? Covers every shift deadline the engine keeps,
+   * plus the guard's own wider window, so neither ceiling can close on a
+   * transition that is still moving. True in automatic and in manual alike.
+   */
+  _inShift(t) {
+    return this._shifting
+      || t < this._shiftGuardEndAt
+      || t < this._glideHoldEndAt
+      || t < this._shiftLandEndAt;
+  }
+
+  _atSlew(param, value, t, tau) {
+    const base = this._levelCeilDbPerSec != null ? this._levelCeilDbPerSec : LEVEL_CEIL_DB_PER_SEC;
+    const cap = this._inShift(t) ? Math.max(base, SHIFT_LEVEL_CEIL_DB_PER_SEC) : base;
+    let v = Math.max(0, value);
+    const prev = this._levelSlew.get(param);
+    if (prev && cap > 0) {
+      const dtReal = Math.min(Math.max(0, t - prev.t), (this.tickMs / 1000) * 3);
+      const maxDb = cap * dtReal;
+      const from = Math.max(prev.v, LEVEL_FLOOR);
+      const to = Math.max(v, LEVEL_FLOOR);
+      const db = 20 * Math.log10(to / from);
+      if (Math.abs(db) > maxDb) v = from * Math.pow(10, (db < 0 ? -maxDb : maxDb) / 20);
+      // Let it reach true zero once the ceiling is no longer what is holding
+      // it up, so a voice that should be silent does not idle at the floor.
+      if (value <= 0 && v <= LEVEL_FLOOR * 1.001) v = 0;
+    }
+    this._levelSlew.set(param, { v, t });
+    at(param, v, t, tau);
+  }
+
   _setParam(param, value, t, tau, eps) {
     const prev = this._lastParam.get(param);
     if (prev != null && Math.abs(prev - value) < eps) return;
     this._lastParam.set(param, value);
     param.setTargetAtTime(value, t, tau);
+  }
+
+  /** Put a parked voice back on the bus. Idempotent. */
+  _unparkVoice(key) {
+    const v = this._voices && this._voices[key];
+    if (!v || !this._nodes) return;
+    try { v.voiceGain.connect(this._nodes.compressor); } catch (_) { /* already on */ }
+    if (this._parkKey === key) { this._parkKey = null; this._parkAt = 0; }
   }
 
   _applyWaves(voice, waves) {
@@ -935,6 +1120,26 @@ export class CrankAudio {
     }
     voices.a.voiceGain.gain.value = 1;
     voices.b.voiceGain.gain.value = 0;
+    // PARK THE IDLE VOICE.
+    //
+    // Voice B exists for exactly one moment: the crossfade when the owner
+    // changes card. The rest of the time its five oscillators, its 2x
+    // oversampled rasp shaper, seven filters, a delay and two panners render a
+    // full engine every quantum into a gain node whose value is the number 0.
+    // Nobody has ever heard a sample of it and nobody can.
+    //
+    // Measured on vessel/tools/crank-load-bench.js (jz-crank, 20 s renders,
+    // min of 9, machine noise +-1.8%): leaving it connected costs 16.8% of the
+    // whole audio thread. That is the largest single saving available anywhere
+    // in this graph that does not change the sound -- the next one down is the
+    // cabin convolver at 20%, and losing that is audible.
+    //
+    // Blink renders by pulling from the destination, so a subtree with no path
+    // there is not processed at all. Disconnecting is therefore genuinely off,
+    // not muted -- the distinction docs/RUNTIME-COST.md was written about.
+    voices.b.voiceGain.disconnect();
+    this._parkKey = null;
+    this._parkAt = 0;
 
     const white = noiseBuffer(ctx, 2, 'white');
     const pink = noiseBuffer(ctx, 2, 'pink');
@@ -1042,7 +1247,7 @@ export class CrankAudio {
    * Road -> RPM. Same model as Classic/VESSEL: acceleration is the load, gears
    * come from speed bands, steady cruise settles to the gear's rev floor.
    */
-  _driveModel(dt) {
+  _driveModel(dt, t = this.ctx.currentTime) {
     const s = this._spec;
     const idle = s.idleRpm;
     const redline = s.redlineRpm;
@@ -1128,6 +1333,8 @@ export class CrankAudio {
       this._gear = step.gear;
       this._driveState = step.state === 'done' ? 'idle' : step.state;
       this._shifting = step.shifting;
+      // Launch Rev scripts their own shifts; they need the same exception.
+      if (step.shifting) this._shiftGuardEndAt = Math.max(this._shiftGuardEndAt, t + SHIFT_GUARD_SEC);
       this._gearBias = gearToneBias(this._gear);
       if (step.done) { this._revUntil = 0; this._revScript = null; }
     } else {
@@ -1135,19 +1342,22 @@ export class CrankAudio {
         this._revUntil = 0;
         this._revScript = null;
       }
-      if (this._shifting) {
-        this._shiftTimer -= dt;
-        if (this._shiftTimer <= 0) {
-          this._shifting = false;
-          if (this._shiftUp && accelLoad > 0.18) this._postShift = 0.14;
-        }
+      // _shiftEndAt/_shiftLandEndAt are ctx.currentTime deadlines, not
+      // per-tick countdowns (see the field comments in the constructor) — a
+      // stalled main thread that skips ticks cannot leave these pinned open
+      // past the freeze, because expiry is "has the clock passed this fixed
+      // point", not "has this been decremented enough times". Letting the
+      // landing pin release abruptly after a long stall is safe because the
+      // oscillator frequency ceiling (see the _setParam(oscL.frequency...)
+      // call site) bounds how fast the audible pitch can follow it either way.
+      if (this._shifting && t >= this._shiftEndAt) {
+        this._shifting = false;
+        if (this._shiftUp && accelLoad > 0.18) this._postShiftEndAt = t + 0.14;
       }
-      if (this._postShift > 0) this._postShift -= dt;
-      if (this._shiftLandT > 0) {
-        this._shiftLandT -= dt;
-        if (this._shiftLandT <= 0) this._shiftLand = null;
+      if (this._shiftLandEndAt && t >= this._shiftLandEndAt) {
+        this._shiftLand = null;
+        this._shiftLandEndAt = 0;
       }
-      if (this._glideHold > 0) this._glideHold -= dt;
 
       // Pulling away is a RAMP, not a step.
       //
@@ -1191,9 +1401,13 @@ export class CrankAudio {
           this._sinceShift = 0;
           this._shifting = true;
           this._shiftUp = up;
-          this._shiftTimer = up ? 0.12 : 0.09;
+          this._shiftEndAt = t + (up ? 0.12 : 0.09);
+          // Both ceilings stand aside for the whole transition. This line is
+          // in the path automatic AND manual share; the isManual() branch
+          // below only decides the rev TARGET, not whether a shift happened.
+          this._shiftGuardEndAt = t + SHIFT_GUARD_SEC;
           // The rpm snap below is a step change. Let the pitch WALK to it.
-          this._glideHold = d.glideHoldSec;
+          this._glideHoldEndAt = t + d.glideHoldSec;
           // NOT IN MANUAL. These snaps belong to the automatic, whose revs come
           // from load: after an upshift it lands just above revLo and that is a
           // fair guess because nothing else decides. In manual the RATIO decides
@@ -1227,11 +1441,11 @@ export class CrankAudio {
           if (!isManual()) {
             if (up) {
               this._shiftLand = shiftLandingRpm(this._gear, idle, redline, d.revLo);
-              this._shiftLandT = d.shiftLandSec ?? 0.3;
+              this._shiftLandEndAt = t + (d.shiftLandSec ?? 0.3);
             } else if (accelLoad > 0.25) {
               this._shiftLand = Math.min(redline * 0.95,
                 Math.max(this._rpm, idle + span * Math.min(0.95, d.revHi * 0.9)));
-              this._shiftLandT = d.shiftLandSec ?? 0.3;
+              this._shiftLandEndAt = t + (d.shiftLandSec ?? 0.3);
             }
           }
         }
@@ -1331,7 +1545,7 @@ export class CrankAudio {
           // Smoothstep has zero slope at both ends, so the constraint arrives
           // and leaves without a kink and the rev line curves out of the shift
           // instead of cornering out of it.
-          const w = clamp(this._shiftLandT / Math.max(0.01, d.shiftLandSec ?? 0.3), 0, 1);
+          const w = clamp((this._shiftLandEndAt - t) / Math.max(0.01, d.shiftLandSec ?? 0.3), 0, 1);
           const ease = smoothstep(0, 1, w);
           const pinned = this._shiftUp
             ? Math.min(targetRpm, this._shiftLand)
@@ -1381,7 +1595,7 @@ export class CrankAudio {
         // ON TOP of the gain duck — two cuts stacked into one hole. Classic
         // applies its duck alone and lets the rev drop carry the shift.
         if (this._shifting) load = clamp(load * (this._shiftUp ? 0.72 : 0.85), 0, 1);
-        else if (this._postShift > 0) load = clamp(load + 0.2 * (this._postShift / 0.14), 0, 1);
+        else if (this._postShiftEndAt > t) load = clamp(load + 0.2 * ((this._postShiftEndAt - t) / 0.14), 0, 1);
 
         // Overrun hysteresis, classic verbatim. A single threshold lets GPS
         // scatter flip cruise<->overrun repeatedly, and every flip switches a
@@ -1429,8 +1643,19 @@ export class CrankAudio {
     const s = this._spec;
     const v = this._voices[this._active];
 
+    // The voice that faded out at the last card change has now been silent for
+    // half a second; take it off the bus so it stops costing the audio thread.
+    if (this._parkKey && t >= this._parkAt) {
+      const parked = this._voices[this._parkKey];
+      if (parked && this._parkKey !== this._active) {
+        try { parked.voiceGain.disconnect(); } catch (_) { /* already off */ }
+      }
+      this._parkKey = null;
+      this._parkAt = 0;
+    }
+
     const cranking = t < this._crankUntil;
-    const drv = this._driveModel(dt);
+    const drv = this._driveModel(dt, t);
     if (cranking) {
       // Starter spinning the engine over before it catches
       this._rpm = 240 + Math.random() * 60;
@@ -1467,7 +1692,7 @@ export class CrankAudio {
       const g = sub.mix
         * (sub.base + (1 - rpmNorm) * sub.lowRpm + this._throttle * sub.throttle)
         * (0.5 + this._bass);
-      at(this._nodes.subGain.gain, g, t, 0.08);
+      this._atSlew(this._nodes.subGain.gain, g, t, 0.08);
     }
 
     // --- induction state -------------------------------------------------
@@ -1536,7 +1761,7 @@ export class CrankAudio {
     // it at the fast rate normally and the slow one through a shift, or the drop
     // arrives as a click. (Launch Rev never exposed this: its script ramps rpm.)
     const d = this._drive;
-    const glide = (this._shifting || this._glideHold > 0) ? d.shiftGlideSec : d.glideSec;
+    const glide = (this._shifting || t < this._glideHoldEndAt) ? d.shiftGlideSec : d.glideSec;
 
     // Pitch ceiling (classic parity). The readout still reaches the real
     // redline, but everything that sets a PLAYED frequency runs on a rev range
@@ -1555,8 +1780,47 @@ export class CrankAudio {
     // second. Fewer events is also strictly less work for the audio thread.
     this._paramTick++;
     const pushAudio = (this._paramTick & 1) === 0;
-    const f = cycleHz(Math.max(pitchRpm, 1));
+    let f = cycleHz(Math.max(pitchRpm, 1));
     if (pushAudio) {
+      // Hard ceiling on how fast the AUDIBLE pitch may move, independent of
+      // whatever the model above computed — a backstop against any glitch
+      // (this one, or one not yet found) that hands the glide a target which
+      // has jumped too far. Bench-measured: an ordinary shift moves the
+      // played frequency at ~35-40 st/s; the main-thread-stall snap this
+      // session chased down measured 120-151 st/s. 52 st/s sits cleanly
+      // between the two. Timestamp-based (ctx.currentTime), not per-tick dt,
+      // so it stays correct across any tick gap, stall or otherwise.
+      const freqBase = this._freqCeilStPerSec != null ? this._freqCeilStPerSec : 52;
+      // Never tighter than the rate the PROFILE asks for. shiftFallStPerSec is
+      // 60 on these cards against a 52 ceiling, so without this the backstop
+      // silently overrode the tune (LAW 1). The x1.2 is headroom for the wander
+      // and jitter the played pitch carries on top of the rev line.
+      const FREQ_CEIL_ST_PER_SEC = this._inShift(t)
+        ? Math.max(freqBase, SHIFT_FREQ_CEIL_ST_PER_SEC, (d.shiftFallStPerSec || 0) * 1.2)
+        : freqBase;
+      const fWanted = f;
+      if (this._lastFreqHz != null && this._lastFreqAt) {
+        // Cap the ALLOWED step to at most a few normal push-intervals' worth
+        // of real time, never the full gap since the last push. Otherwise a
+        // long stall "banks" one big allowed jump — legitimate by a
+        // time-averaged rate, but the fast glide then closes it in a blink,
+        // which is audibly the same snap this cap exists to remove. Capping
+        // dtReal makes this a true slew limit on the played signal, not a
+        // time-proportional allowance that a stall can cash in all at once.
+        const dtReal = Math.min(Math.max(0, t - this._lastFreqAt), (this.tickMs / 1000) * 3);
+        const maxSt = FREQ_CEIL_ST_PER_SEC * dtReal;
+        const st = 12 * Math.log2(Math.max(1, f) / this._lastFreqHz);
+        if (Math.abs(st) > maxSt) f = this._lastFreqHz * Math.pow(2, (st < 0 ? -maxSt : maxSt) / 12);
+      }
+      // What the model ASKED for, kept beside what the cap allowed. A ceiling
+      // that is saturating is not a backstop any more -- it has become the
+      // sound. These two make that answerable instead of assumable; see
+      // vessel/tools/crank-stall-bench.js `demand()`.
+      this._freqReqHz = fWanted;
+      this._freqCapped = f !== fWanted;
+      this._lastFreqHz = f;
+      this._lastFreqAt = t;
+
       this._setParam(v.oscL.frequency, f, t, glide, f * 0.004);
       this._setParam(v.oscR.frequency, f, t, glide, f * 0.004);
       this._setParam(v.oscIntake.frequency, f, t, glide, f * 0.004);
@@ -1598,10 +1862,22 @@ export class CrankAudio {
     const whistleLvl = s.induction === 'turbo' ? this._boost * 0.22 * rpmNorm
       : s.itb ? rpmNorm * load * 0.08 : this._vtec * 0.12;
 
-    at(v.exhaustGain.gain, cranking ? exhaust * 0.12 : exhaust, t, 0.03);
-    at(v.intakeGain.gain, intake * 0.55, t, 0.03);
-    at(v.combGain.gain, combLvl * 0.28 * (0.5 + this._mixer.exhaust), t, 0.04);
-    at(v.mechGain.gain, mech * 0.22 * (cranking ? 0.5 : 1), t, 0.04);
+    // Every one of these through the ceiling. The crank-to-catch handover is
+    // the clearest case: `cranking` flips false on one tick and exhaust goes
+    // from 12% to 100% of its voice, +18.4 dB, with nothing between the two
+    // values. That is a step at engine start, which is precisely where the
+    // owner says he hears it.
+    this._atSlew(v.exhaustGain.gain, cranking ? exhaust * 0.12 : exhaust, t, 0.03);
+    this._atSlew(v.intakeGain.gain, intake * 0.55, t, 0.03);
+    this._atSlew(v.combGain.gain, combLvl * 0.28 * (0.5 + this._mixer.exhaust), t, 0.04);
+    this._atSlew(v.mechGain.gain, mech * 0.22 * (cranking ? 0.5 : 1), t, 0.04);
+    // NOT through the ceiling, and the demand probe is why. Turbo and whistle
+    // spend most of their life at essentially zero and open from there, so
+    // their rate in dB is enormous -- 341 and 283 dB/s on the Civic -- while
+    // the absolute level involved is tiny and the move is the spool and the
+    // VTEC crossover, i.e. the induction voice doing the thing it exists for.
+    // Rate-limiting a gain that starts near silence is limiting an arithmetic
+    // artefact, not a loudness. delayGain is a mix, not a level.
     at(v.turboGain.gain, ind * turboLvl * 0.35, t, 0.05);
     at(v.whistleGain.gain, ind * whistleLvl, t, 0.05);
     at(v.delayGain.gain, s.delayMix * (0.4 + rpmNorm * 0.6), t, 0.08);
@@ -1633,6 +1909,12 @@ export class CrankAudio {
           this._sharpCam = sharp;
           this._camHold = c.dwellSec;
           this._camPending = sharp ? 'sharp' : 'mild';
+          // Deliberately NOT through the level ceiling. This duck exists to
+          // hide a setPeriodicWave, which replaces the entire waveform in one
+          // sample; slowing the duck down would uncover the click it is there
+          // to cover. Same for the starter envelope and the overrun pops --
+          // they are events, not levels, and a rate limit on a transient just
+          // removes the transient.
           v.sum.gain.setTargetAtTime(c.duckTo ?? 0.35, t, 0.004);
         }
       }
@@ -1680,7 +1962,10 @@ export class CrankAudio {
       shiftDuck: this._dyn.shiftDuck,
       overrunDuck: this._dyn.overrunDuck,
     });
-    at(this._nodes.dynGain.gain, clamp(dyn.dynVol, 0, 1.2), t, 0.05);
+    // The in-car loudness curve is one number carrying the whole drive
+    // envelope, so it is the single most likely place for a stalled tick to
+    // arrive as a lurch.
+    this._atSlew(this._nodes.dynGain.gain, clamp(dyn.dynVol, 0, 1.2), t, 0.05);
 
     const master = this._masterOverride != null ? this._masterOverride : sq(this._mixer.master);
     at(this._nodes.master.gain, master, t, 0.04);
