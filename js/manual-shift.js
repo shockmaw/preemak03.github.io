@@ -92,6 +92,7 @@ function doShift(dir, source) {
   // is gone rather than documented.
   if (!isManual()) {
     engageManual(lastKnownGear());
+    record('mode', `manual ON (${source})`, true);
     if (onChange) onChange(manualGear(), source + ' (engaged)');
   }
   if (now() - lastShiftAt < REPEAT_LOCK_MS) return;
@@ -126,6 +127,30 @@ export function setPedal(on) {
     if (ui.gas.parentNode) ui.gas.remove();
   }
 }
+
+/**
+ * Every input that arrives, kept as counts rather than a stream.
+ *
+ * MODULE SCOPE, not inside startManualShift(). build() runs before that
+ * closure exists and now records mode changes of its own, so a copy per
+ * instance would have been a ReferenceError the first time the gear box was
+ * pressed. One tally per session is also what the trace wants.
+ *
+ * The on-screen probe answers "what did that control send?" only if someone is
+ * looking at the screen, and driving takes 80-85% of his attention. So the
+ * tally rides along in the drive trace instead: turn every control in the car
+ * once, tap send, and the answer arrives whether or not anyone watched.
+ * `matched:false` entries are the valuable ones — an input that was dropped,
+ * with the reason it was dropped.
+ */
+const seen = new Map();
+const record = (kind, name, matched) => {
+  const k = `${kind}:${name}`;
+  const e = seen.get(k);
+  if (e) { e.n++; e.matched = e.matched || matched; }
+  else seen.set(k, { kind, name, n: 1, matched });
+};
+const inputLog = () => [...seen.values()].sort((a, b) => b.n - a.n).slice(0, 40);
 
 function flash(which, blocked) {
   if (!ui) return;
@@ -386,10 +411,28 @@ function build(getGear, withPedal) {
   // nothing anyone should have to aim at from the driver's seat. The box it
   // sits in is already a single idea (which gear, and who is choosing it), so
   // the box is the control and the pill is just what it says.
+  // A tap on the box switches mode. One tap, both ways — the owner does this
+  // deliberately to compare automatic against manual, and a guard here would
+  // fight him.
+  //
+  // A first read of trace 1-9-03 had this backwards. Holding 59 km/h in gear 3,
+  // the revs sat at 4700-4760 (manual's 7000 x 59/90 = 4589, a number the
+  // automatic cannot produce at accel 0) and then collapsed to 1493-1628, the
+  // automatic's gear-3 cruise floor — twenty semitones at a constant speed with
+  // the gear NUMBER unchanged, because 59 km/h resolves to gear 3 either way.
+  // That looked like an accidental release, and a fumble guard was written for
+  // it. It was not accidental: he pressed it on purpose to try automatic. The
+  // defect is that the HANDOVER is a twenty-semitone collapse, not that the
+  // press happened — so the guard came out and the handover got fixed instead.
+  //
+  // Every mode change is recorded either way, because the last four traces
+  // could not show one at all.
   const flip = () => {
-    if (isManual()) releaseManual();
-    else engageManual(getGear ? getGear() : 1);
+    const on = !isManual();
+    if (on) engageManual(getGear ? getGear() : 1);
+    else releaseManual();
     wheelAcc = 0;
+    record('mode', on ? 'manual ON (tap)' : 'manual OFF (tap)', true);
     render();
   };
   root.addEventListener('click', flip);
@@ -421,25 +464,6 @@ export function startManualShift({ getGear, onGearChange, sim: simRefs, pedal: w
   // input that arrives is NAMED on screen — in the same slot that already
   // shows which source last moved a gear — whether or not it shifts anything.
   // Turn the wheel, read the line, and the question is answered.
-  /**
-   * Every input that arrives, kept as counts rather than a stream.
-   *
-   * The on-screen probe answers "what did that control send?" only if someone
-   * is looking at the screen, and the owner has said plainly that driving takes
-   * 80-85% of his attention — reading a line while turning a wheel is not a
-   * thing he can do. So the tally rides along in the drive trace instead: turn
-   * every control in the car once, tap send, and the answer arrives by mail
-   * whether or not anyone watched. `matched:false` entries are the valuable
-   * ones — that is a control the gearbox is ignoring.
-   */
-  const seen = new Map();
-  const record = (kind, name, matched) => {
-    const k = `${kind}:${name}`;
-    const e = seen.get(k);
-    if (e) { e.n++; e.matched = e.matched || matched; }
-    else seen.set(k, { kind, name, n: 1, matched });
-  };
-  const inputLog = () => [...seen.values()].sort((a, b) => b.n - a.n).slice(0, 40);
 
   const probe = (what) => {
     // Only when the text actually changes. A wheel can fire dozens of events a

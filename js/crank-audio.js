@@ -41,6 +41,7 @@ import {
   rpmInGear,
   rpmInGearManual,
   isManual,
+  takeManualEvent,
   gearProgress,
   gearToneBias,
   shiftLandingRpm,
@@ -296,6 +297,26 @@ const SHIFT_GUARD_SEC = 0.5;
 const SHIFT_FREQ_CEIL_ST_PER_SEC = 130;
 const SHIFT_LEVEL_CEIL_DB_PER_SEC = 320;
 
+/**
+ * A MODE HANDOVER IS THE OPPOSITE OF A GEAR CHANGE, AND NEEDS THE OPPOSITE.
+ *
+ * A gear change is a real mechanical event and gets a RAISED ceiling so the
+ * backstop cannot chop it. Switching between automatic and manual is not: the
+ * car is at a constant speed, nothing physical happens, and the whole rev move
+ * is an artefact of the two modes computing from different inputs. There is no
+ * musical reason to rush it, so it gets the TIGHTEST ceiling in the engine.
+ *
+ * The first attempt reused the gear-change window wholesale. It halved the
+ * level rate (54 -> 28 dB/s, from the duck and the slow glide) and made the
+ * pitch WORSE — 32 -> 56 st/s — because that window raises the pitch ceiling
+ * to 130. Right machinery, wrong ceiling.
+ *
+ * 20 st/s stretches the measured 13.7-semitone handover over at least 0.7 s and
+ * takes the peak rate off the front of it, where it was steepest.
+ */
+const MODE_FREQ_CEIL_ST_PER_SEC = 20;
+const MODE_HANDOVER_SEC = 1.2;
+
 const ST = 12 / Math.LN2;
 
 /** km/h/s. Below this the acceleration reading is scatter (classic parity). */
@@ -504,6 +525,10 @@ export class CrankAudio {
     // values. Wider than every other shift deadline on purpose — see
     // SHIFT_GUARD_SEC. Set in the shared path, so auto and manual both get it.
     this._shiftGuardEndAt = 0;
+    // ctx.currentTime until which an automatic<->manual handover is in flight.
+    // Deliberately separate from the shift window: it TIGHTENS the pitch
+    // ceiling where a shift loosens it.
+    this._modeEndAt = 0;
 
     // Launch Rev
     this._revUntil = 0;
@@ -1390,6 +1415,30 @@ export class CrankAudio {
         this._gearBias = gearToneBias(1);
       } else {
         this._sinceShift += dt;
+        // THE MODE HANDOVER.
+        //
+        // A gear change announces itself by changing the gear NUMBER, which is
+        // what the block below watches. A change between automatic and manual
+        // does not: at 59 km/h the automatic resolves gear 3 and the driver was
+        // holding gear 3, so nothing downstream noticed — while the rev TARGET
+        // moved from 4589 (speed x ratio) to about 1550 (the automatic's cruise
+        // floor). Twenty semitones with no event attached to it, which is why
+        // the slew ceiling was left to walk it down over a second on its own.
+        //
+        // takeManualEvent() was written for exactly this and had never been
+        // called from anywhere. Reading it here hands the move to the same
+        // glide, duck and guard window a real gear change gets — all of them
+        // already tuned for a rev step of this size.
+        if (takeManualEvent() === 'mode' && !this._shifting) {
+          this._shifting = true;
+          this._shiftUp = false;          // a handover, not an upshift
+          this._shiftEndAt = t + 0.12;
+          this._glideHoldEndAt = t + Math.max(d.glideHoldSec, 0.35);
+          // NOT _shiftGuardEndAt. That window exists to let a gear change move
+          // FAST; this one has to make a handover move slowly.
+          this._modeEndAt = t + MODE_HANDOVER_SEC;
+          this._sinceShift = 0;
+        }
         let nextGear = resolveGear(speed, this._gear, accelRaw, decelLoad);
         if (nextGear > this._gear + 1) nextGear = this._gear + 1;
         else if (nextGear < this._gear - 1) nextGear = this._gear - 1;
@@ -1795,9 +1844,13 @@ export class CrankAudio {
       // 60 on these cards against a 52 ceiling, so without this the backstop
       // silently overrode the tune (LAW 1). The x1.2 is headroom for the wander
       // and jitter the played pitch carries on top of the rev line.
-      const FREQ_CEIL_ST_PER_SEC = this._inShift(t)
-        ? Math.max(freqBase, SHIFT_FREQ_CEIL_ST_PER_SEC, (d.shiftFallStPerSec || 0) * 1.2)
-        : freqBase;
+      // Mode handover is checked FIRST and wins: it is the one case that wants
+      // the ceiling tighter rather than looser, and it sets the shift flags too.
+      const FREQ_CEIL_ST_PER_SEC = t < this._modeEndAt
+        ? MODE_FREQ_CEIL_ST_PER_SEC
+        : this._inShift(t)
+          ? Math.max(freqBase, SHIFT_FREQ_CEIL_ST_PER_SEC, (d.shiftFallStPerSec || 0) * 1.2)
+          : freqBase;
       const fWanted = f;
       if (this._lastFreqHz != null && this._lastFreqAt) {
         // Cap the ALLOWED step to at most a few normal push-intervals' worth

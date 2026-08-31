@@ -69,10 +69,24 @@ export function manualGear() { return _manualGear; }
 /** Engage manual, starting from whatever gear the automatic was in. */
 export function engageManual(fromGear = 1) {
   _manualGear = clamp(Math.round(fromGear) || 1, 1, GEAR_COUNT);
+  // A MODE CHANGE IS AN EVENT, and the engine has to be told.
+  //
+  // The two modes are on different axes: automatic rpm is f(acceleration),
+  // manual rpm is speed x ratio. Switching between them moves the rev TARGET
+  // between two unrelated numbers with nothing in between. Measured on a real
+  // drive holding 59 km/h in gear 3: 4700 (manual) -> 1550 (the automatic's
+  // cruise floor), twenty semitones, with the gear number never changing.
+  // The slew ceiling turned the teleport into a one-second descending swoop,
+  // which is better than a click and still the loudest thing on that drive.
+  //
+  // Naming it lets the engine hand over the way it already hands over a gear
+  // change — its glide, its duck and its guard window are all tuned for
+  // exactly this shape of move. See takeManualEvent() in crank-audio.
+  _manualEvent = 'mode';
   return _manualGear;
 }
 
-export function releaseManual() { _manualGear = null; _manualEvent = null; }
+export function releaseManual() { _manualGear = null; _manualEvent = 'mode'; }
 
 /** One gear up or down. Returns the new gear, or null when not engaged. */
 export function shiftManual(dir) {
