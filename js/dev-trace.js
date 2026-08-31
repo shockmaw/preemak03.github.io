@@ -204,8 +204,24 @@ export function startDevTrace(getAudio, state, physics) {
     // above it, a moment the context could not render is worth keeping even if
     // the level and the pitch both looked fine, because that is precisely the
     // failure the other three terms are blind to.
-    const score = rough[i] + dPitchNow * 3 + Math.max(0, (tick[i] - 40) / 10)
+    let score = rough[i] + dPitchNow * 3 + Math.max(0, (tick[i] - 40) / 10)
       + Math.max(0, (audLag[i] - 20) / 5);
+    // KNOWN-GOOD EVENTS DO NOT GET TO WIN.
+    //
+    // The recorder keeps the top few moments of a drive, and across four real
+    // traces the top slots went to things that are supposed to be loud:
+    // Launch Rev scored 29.4 dB (stationary, revs sweeping 3900-4800 by
+    // design) and took the number one slot in two of the four files, and the
+    // starter sequence scored 18.5. Between them they ate most of the eight
+    // slots, and the defect underneath — a steady 59 km/h cruise reading
+    // 13.2 dB — nearly did not make the list at all.
+    //
+    // A rev at a standstill and a starter below idle are both identifiable
+    // without guessing, so they are scored down rather than dropped: still
+    // visible if a drive contains nothing else, never in front of a real one.
+    const launchRev = active[i] < 1 && Math.abs(accel[i]) < 0.5 && rpm[i] > 1500;
+    const starting = rpm[i] < 700 && pitch[i] > 0;
+    if (launchRev || starting) score *= 0.15;
     const nowS = t[i] / 1000;
     // The engine start outscores everything that follows — the first run of
     // this filled the top two slots with it and squeezed the actual drive out.
@@ -383,6 +399,15 @@ export function startDevTrace(getAudio, state, physics) {
         // give and the first thing to underrun when the MCU is busy drawing.
         // baseLatencyMs beside it is the buffer that actually resulted.
         perfTier: au && au._lite != null ? (au._lite ? 'lite' : 'full') : null,
+        // Was the gearbox in manual at all? Four traces came back with 54
+        // arrow-key presses recorded `matched: true` and no way to tell
+        // whether a single one of them moved a gear, because the only entry
+        // into manual was a tap on a box and nothing recorded that state.
+        manual: (() => {
+          try { return !!(window.TAS && window.TAS.manualLive && window.TAS.manualLive()); }
+          catch (_) { return null; }
+        })(),
+        manualGear: (au && au._gear) || null,
       };
       const body = {
         access_key: 'b0c38acf-3953-4910-9fbb-290ad09af3a5',

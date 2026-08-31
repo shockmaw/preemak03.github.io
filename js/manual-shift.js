@@ -27,6 +27,8 @@ const WHEEL_STEP = 40;      // accumulated deltaY that counts as one detent
 const REPEAT_LOCK_MS = 180; // one gear per gesture, not per event
 
 let ui = null;
+/** The automatic's current gear, so an engage lands where the car already is. */
+let lastKnownGear = () => 1;
 let wheelAcc = 0;
 let lastShiftAt = 0;
 let lastSource = '—';
@@ -75,7 +77,23 @@ const SPEED_CAP = 260;
 const now = () => performance.now();
 
 function doShift(dir, source) {
-  if (!isManual()) return;
+  // A SHIFT INPUT ENGAGES MANUAL. This used to `return` here, and that was the
+  // whole bug behind "the gear input does not work while driving".
+  //
+  // The only way into manual was tapping a 72x83 box on the right of the
+  // screen. The owner's actual control is the steering-wheel scroller, which
+  // the car reports as ArrowUp/ArrowDown — so the gesture arrived, was
+  // recorded, matched the up/down keys, and then died on this line without a
+  // sound. Parked, he taps the box first and everything works; moving, he
+  // reaches for the wheel and nothing happens. That is exactly the report.
+  //
+  // Every car with paddles behaves the way this now does: pull one in D and it
+  // drops into manual at the gear it was already in. The hidden precondition
+  // is gone rather than documented.
+  if (!isManual()) {
+    engageManual(lastKnownGear());
+    if (onChange) onChange(manualGear(), source + ' (engaged)');
+  }
   if (now() - lastShiftAt < REPEAT_LOCK_MS) return;
   const before = manualGear();
   const g = shiftManual(dir);
@@ -390,6 +408,7 @@ export function startManualShift({ getGear, onGearChange, sim: simRefs, pedal: w
   if (ui) return { destroy() {} };
   onChange = onGearChange || null;
   sim = simRefs || null;
+  lastKnownGear = () => (getGear ? getGear() : 1);
   build(getGear, withPedal);
 
   // The scroll wheel. Accumulated, because a detent can arrive as several
@@ -521,8 +540,12 @@ export function startManualShift({ getGear, onGearChange, sim: simRefs, pedal: w
     // away", which is the difference between a car problem and a bug here.
     if (isTyping(e.target)) { record('key', `${name} [in a text field]`, false); return; }
     if (e.ctrlKey || e.altKey || e.metaKey) { record('key', `${name} [modifier]`, false); return; }
-    record('key', name, up || down);
-    if (!isManual()) return;
+    // The wheel path has always recorded WHY an input was dropped; this one
+    // never did, so a trace could not tell "he never entered manual" from
+    // "it shifted fine" — both came back `matched: true`. Four drives were
+    // read that way. `matched` now means the gear actually moved.
+    if (!up && !down) { record('key', `${name} [not a gear key]`, false); return; }
+    record('key', name, true);
     // Held keys must not machine-gun the box; doShift also holds a repeat lock,
     // this stops the events before they get there.
     if (e.repeat) { if (up || down) e.preventDefault(); return; }

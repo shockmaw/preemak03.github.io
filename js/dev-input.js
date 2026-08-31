@@ -25,6 +25,11 @@
  *     arrived 12, survived 12   it reaches us intact; the handler is at fault
  *     arrived 12, survived 0    something on this page is eating it
  *
+ *   ...but ONLY for events that bubble. `scroll` on an element does not, so it
+ *   can never reach a bubble listener on window and always reads 0. The first
+ *   four real traces all showed `scroll 74/0` and it meant nothing at all —
+ *   see the note on bump(). Non-bubbling kinds print `–` rather than a number.
+ *
  *   Nothing here can interfere with what it measures: every listener is
  *   `passive` where the browser allows it and none of them call
  *   preventDefault or stopPropagation.
@@ -48,13 +53,28 @@ const KINDS = [
 const fmtAgo = (ms) => (ms == null ? '—' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
 
 export function startDevInput({ getState } = {}) {
-  // kind -> { arrived, survived, lastAt, detail }
+  // kind -> { arrived, survived, bubbling, lastAt, detail }
+  //
+  // `bubbling` is why survived is only meaningful for SOME events, and getting
+  // this wrong sent the first read of four real drives chasing a phantom:
+  // every trace showed `scroll  arrived 74 / survived 0` in red, which reads
+  // as "something is eating every scroll". It is not. A scroll fired on an
+  // element has bubbles:false, so it can never reach a bubble-phase listener
+  // on window — survived 0 is the DOM working correctly. Measured directly:
+  // element scroll -> arrived 5, survived 0, bubbles false.
+  //
+  // So survived is compared only where the event actually bubbles, and a
+  // non-bubbling event says so instead of pretending to be a defect.
   const tally = new Map();
-  const bump = (kind, phase, detail) => {
+  const bump = (kind, phase, detail, bubbles) => {
     let e = tally.get(kind);
-    if (!e) { e = { arrived: 0, survived: 0, lastAt: 0, detail: '' }; tally.set(kind, e); }
-    if (phase === 'capture') { e.arrived++; e.lastAt = performance.now(); if (detail) e.detail = detail; }
-    else e.survived++;
+    if (!e) { e = { arrived: 0, survived: 0, bubbling: null, lastAt: 0, detail: '' }; tally.set(kind, e); }
+    if (phase === 'capture') {
+      e.arrived++;
+      e.lastAt = performance.now();
+      if (bubbles != null) e.bubbling = e.bubbling === false ? false : bubbles;
+      if (detail) e.detail = detail;
+    } else e.survived++;
   };
 
   /** What made this event interesting, in as few characters as possible. */
@@ -71,8 +91,8 @@ export function startDevInput({ getState } = {}) {
 
   const bound = [];
   for (const kind of KINDS) {
-    const cap = (ev) => bump(kind, 'capture', detailOf(kind, ev));
-    const bub = (ev) => bump(kind, 'bubble', null);
+    const cap = (ev) => bump(kind, 'capture', detailOf(kind, ev), !!ev.bubbles);
+    const bub = () => bump(kind, 'bubble', null, null);
     // passive so this can never be the thing that blocks a scroll it is here
     // to explain. capture:true puts us ahead of every other listener.
     try { window.addEventListener(kind, cap, { capture: true, passive: true }); } catch (_) { continue; }
@@ -91,7 +111,7 @@ export function startDevInput({ getState } = {}) {
       <button type="button" class="dip-btn" data-act="reset">ล้าง</button>
       <button type="button" class="dip-btn" data-act="close">ปิด</button>
     </div>
-    <div class="dip-legend">arrived = รถส่งมา · survived = ไม่มีใครกินระหว่างทาง</div>
+    <div class="dip-legend">arrived = รถส่งมา · survived = ไม่มีใครกิน (– = event นี้ไม่ bubble เทียบไม่ได้)</div>
     <div class="dip-rows"></div>
     <div class="dip-drive"></div>`;
   document.body.appendChild(panel);
@@ -120,13 +140,13 @@ export function startDevInput({ getState } = {}) {
     let html = '';
     for (const k of live) {
       const e = tally.get(k);
-      // survived < arrived means something between window-capture and
-      // window-bubble stopped propagation. That is the eaten case.
-      const eaten = e.survived < e.arrived;
+      // Only a BUBBLING event can be judged this way. See the note on bump().
+      const eaten = e.bubbling === true && e.survived < e.arrived;
+      const survivedCell = e.bubbling === false ? '–' : e.survived;
       html += `<div class="dip-row${eaten ? ' eaten' : ''}">`
         + `<span class="dip-k">${k}</span>`
         + `<span class="dip-n">${e.arrived}</span>`
-        + `<span class="dip-n">${e.survived}</span>`
+        + `<span class="dip-n">${survivedCell}</span>`
         + `<span class="dip-d">${e.detail || ''}</span>`
         + `<span class="dip-t">${fmtAgo(e.lastAt ? now - e.lastAt : null)}</span>`
         + '</div>';
@@ -171,7 +191,7 @@ export function startDevInput({ getState } = {}) {
     visible: () => !panel.hidden,
     /** The tally, for the drive trace to carry home. */
     snapshot: () => [...tally.entries()].map(([kind, e]) => ({
-      kind, arrived: e.arrived, survived: e.survived, detail: e.detail,
+      kind, arrived: e.arrived, survived: e.survived, bubbling: e.bubbling, detail: e.detail,
     })),
     stop() {
       api.hide();
