@@ -25,6 +25,14 @@ import {
 
 const WHEEL_STEP = 40;      // accumulated deltaY that counts as one detent
 const REPEAT_LOCK_MS = 180; // one gear per gesture, not per event
+/**
+ * The same lock, longer, for auto-repeat.
+ *
+ * A rotary control that the browser reports as a held key sends a burst of
+ * `repeat` events per detent. 500 ms turns one flick of the wheel into one
+ * gear, and still lets a genuinely held paddle walk the box at two a second.
+ */
+const HOLD_LOCK_MS = 500;
 
 let ui = null;
 /** The automatic's current gear, so an engage lands where the car already is. */
@@ -76,7 +84,7 @@ const SPEED_CAP = 260;
 
 const now = () => performance.now();
 
-function doShift(dir, source) {
+function doShift(dir, source, isRepeat = false) {
   // A SHIFT INPUT ENGAGES MANUAL. This used to `return` here, and that was the
   // whole bug behind "the gear input does not work while driving".
   //
@@ -95,7 +103,7 @@ function doShift(dir, source) {
     record('mode', `manual ON (${source})`, true);
     if (onChange) onChange(manualGear(), source + ' (engaged)');
   }
-  if (now() - lastShiftAt < REPEAT_LOCK_MS) return;
+  if (now() - lastShiftAt < (isRepeat ? HOLD_LOCK_MS : REPEAT_LOCK_MS)) return;
   const before = manualGear();
   const g = shiftManual(dir);
   if (g === before) {           // already at the end of the box
@@ -570,11 +578,25 @@ export function startManualShift({ getGear, onGearChange, sim: simRefs, pedal: w
     // read that way. `matched` now means the gear actually moved.
     if (!up && !down) { record('key', `${name} [not a gear key]`, false); return; }
     record('key', name, true);
-    // Held keys must not machine-gun the box; doShift also holds a repeat lock,
-    // this stops the events before they get there.
-    if (e.repeat) { if (up || down) e.preventDefault(); return; }
-    if (up) { doShift(1, 'key'); e.preventDefault(); }
-    else if (down) { doShift(-1, 'key'); e.preventDefault(); }
+    // AUTO-REPEAT IS NOT NECESSARILY A HELD KEY.
+    //
+    // This used to `return` on e.repeat, silently and without recording it —
+    // the last silent drop left in this path. The guard was written for a
+    // held keyboard arrow machine-gunning the box, but the owner's control is
+    // the steering-wheel scroller, which the car reports as ArrowUp/ArrowDown,
+    // and a rotary encoder seen as a held key sends its detents as `repeat`.
+    // If that is what the car does, then every event after the first was being
+    // thrown away — which is exactly "I press to manual and then the scroll
+    // will not change gear", and no trace could show it because nothing was
+    // written down.
+    //
+    // So repeats go through, under a longer lock (see HOLD_LOCK_MS): one flick
+    // is one gear, a genuinely held paddle walks at two a second, and the
+    // machine-gun the old guard existed to stop still cannot happen. Recorded
+    // separately either way, so the next drive says which it is.
+    if (e.repeat) record('key', `${name} [auto-repeat]`, true);
+    if (up) { doShift(1, e.repeat ? 'key-hold' : 'key', !!e.repeat); e.preventDefault(); }
+    else if (down) { doShift(-1, e.repeat ? 'key-hold' : 'key', !!e.repeat); e.preventDefault(); }
   };
 
   const onKeyUp = (e) => {

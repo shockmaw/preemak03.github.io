@@ -311,11 +311,15 @@ const SHIFT_LEVEL_CEIL_DB_PER_SEC = 320;
  * pitch WORSE — 32 -> 56 st/s — because that window raises the pitch ceiling
  * to 130. Right machinery, wrong ceiling.
  *
- * 20 st/s stretches the measured 13.7-semitone handover over at least 0.7 s and
- * takes the peak rate off the front of it, where it was steepest.
+ * 20 st/s was the first setting and the owner asked for gentler still, so it
+ * is 12: the measured 13.7-semitone handover now cannot complete in under
+ * 1.14 s, against 0.69 s at 20 and about 1.0 s of uncontrolled fall before any
+ * of this existed. The window has to outlast the move it is limiting or the
+ * ceiling lifts before the end and the tail of the fall speeds up again, so
+ * 1.8 s — comfortably past the 1.2 s the slowest direction now takes.
  */
-const MODE_FREQ_CEIL_ST_PER_SEC = 20;
-const MODE_HANDOVER_SEC = 1.2;
+const MODE_FREQ_CEIL_ST_PER_SEC = 12;
+const MODE_HANDOVER_SEC = 1.8;
 
 const ST = 12 / Math.LN2;
 
