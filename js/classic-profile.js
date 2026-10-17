@@ -8,7 +8,7 @@
  *   2. AudioEngine is a pure profile player (no silent rewrite in update())
  *   3. validateClassicProfile() gates every Save — bad values never ship
  *   4. resolveClassicProfile() fills *missing* keys once — never mid-frame
- *   5. App system (Master / GPS) is NOT a sound profile field
+ *   5. App system (Master / CAN) is NOT a sound profile field
  *
  * Violating this when you have many profiles breaks every card at once.
  * These rules were written before and then neglected — do not neglect again.

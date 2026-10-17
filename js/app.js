@@ -11,7 +11,8 @@ import { hasRig } from './vessel-rigs.js';
 // same trick for CRANK — the id map is a few bytes, CrankAudio loads on demand
 import { hasCrank } from './crank-rigs.js';
 import { hasTurbine } from './turbine-rigs.js';
-import { GeolocationService } from './geolocation.js';
+import { CanLink, defaultCanUrl, rememberCanUrl } from './can-link.js';
+import { createDriveMapper } from './can-map.js';
 import { VehiclePhysics, SIM_RATE } from './vehicle-physics.js';
 import { startOnboarding } from './onboarding.js';
 import {
@@ -21,7 +22,7 @@ import {
   bindToggles,
   setModeUI,
   setAudioStatus,
-  setGpsStatus,
+  setCanStatus,
   showToast,
   finishBoot,
   $,
@@ -58,14 +59,14 @@ function initHud() {
 
 /**
  * Vertical accel tube: 0 = middle, +max = top, −max = bottom.
- * Smoothed (GPS Δv/Δt is spiky) + a mild expansion curve so everyday
+ * Smoothed so a stepped drive sample glides, and a mild expansion curve so everyday
  * acceleration is clearly visible while a full launch still pegs the ends.
  * @param {number} accelKmhps
  */
 function updateAccelTube(accelKmhps) {
   const max = ACCEL_TUBE_MAX;
   const target = clamp(accelKmhps, -max, max);
-  // Smooth the needle so each per-second GPS value glides (and drops back to
+  // Smooth the needle so each drive sample glides (and drops back to
   // 0 smoothly when acceleration ends) instead of snapping.
   hud._accelDisp = (hud._accelDisp || 0) + (target - (hud._accelDisp || 0)) * 0.15;
   const a = hud._accelDisp;
@@ -145,20 +146,25 @@ function initThemeToggle() {
 }
 
 const state = {
-  mode: 'geo', // 'geo' | 'sim'
+  mode: 'sim', // 'can' | 'sim'
   profileId: 'camaro-restomod',
   /** Fader demand (simulation target) */
   targetSpeed: 0,
-  geoSpeed: 0,
-  geoAccuracy: null,
   /** Actual speed fed to audio/UI */
   activeSpeed: 0,
   /** Longitudinal accel km/h per second — primary audio load */
   accelKmhps: 0,
   throttle: 0,
   brake: 0,
+  regen: 0,
+  /** Motor/axle speed in a combustion-tach band. Telemetry only — not written into the synth. */
+  rpmProxy: null,
   engineOn: false,
 };
+
+/** How fast a quiet CAN socket eases the car back to idle. App-system, not a profile. */
+const CAN_IDLE_SPEED = 1.15;
+const CAN_IDLE_LOAD = 2.6;
 
 let audio = new AudioEngine();
 
@@ -313,13 +319,14 @@ async function ensureEngineFor(id) {
     if (wasRunning) await audio.start();
   }
 }
-const geo = new GeolocationService();
+const canLink = new CanLink();
+const driveMap = createDriveMapper();
 const physics = new VehiclePhysics(SIM_RATE);
 const speedUI = new SpeedDisplay();
 
 /**
- * Drive lock — in GPS mode the touch controls lock while the car is moving.
- * Exception: standing still (GPS speed ≈ 0) for over 3 s (red light, parked)
+ * Drive lock — in CAN mode the touch controls lock while the car is moving.
+ * Exception: standing still (speed ≈ 0) for over 3 s (red light, parked)
  * unlocks everything. Push-to-start is never locked so sound can always be
  * killed instantly.
  */
@@ -327,7 +334,7 @@ const driveLock = { stillSince: 0, engaged: null };
 
 function updateDriveLock(now) {
   let shouldLock = false;
-  if (state.mode === 'geo') {
+  if (state.mode === 'can') {
     if (state.activeSpeed < 1) {
       if (!driveLock.stillSince) driveLock.stillSince = now;
     } else {
@@ -422,8 +429,8 @@ function updateTuneScope(profileId) {
   }
   if (hint) {
     hint.textContent = kind === 'classic'
-      ? 'Bass/Edge = this card · Master/GPS = app-wide'
-      : 'Sound = cabin/DNA of this card · App = Master/GPS (global)';
+      ? 'Bass/Edge = this card · Master/CAN = app-wide'
+      : 'Sound = cabin/DNA of this card · App = Master/CAN (global)';
   }
   if (note) {
     note.textContent =
@@ -533,10 +540,28 @@ async function init() {
     }
   });
 
-  // GPS chip toggles between real GPS speed (geo) and the sim fader
-  $('#btn-gps')?.addEventListener('click', () => {
-    setMode(state.mode === 'geo' ? 'sim' : 'geo');
+  // CAN chip toggles between the WebSocket drive stream and the sim fader
+  $('#btn-can')?.addEventListener('click', () => {
+    setMode(state.mode === 'can' ? 'sim' : 'can');
   });
+
+  const canInput = $('#can-url');
+  if (canInput) {
+    canInput.value = defaultCanUrl();
+    const applyUrl = () => {
+      const url = canInput.value.trim();
+      if (!url) return;
+      rememberCanUrl(url);
+      if (state.mode === 'can') canLink.start(url);
+    };
+    canInput.addEventListener('change', applyUrl);
+    canInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        applyUrl();
+      }
+    });
+  }
 
   $('#btn-engine')?.addEventListener('click', async () => {
     const btn = $('#btn-engine');
@@ -551,19 +576,19 @@ async function init() {
         state.engineOn = true;
         setAudioStatus(true);
         $('#btn-launch')?.classList.add('is-armed');
-        if (state.mode === 'geo') {
-          showToast('Engine online · idle active at 0 km/h');
+        if (state.mode === 'can') {
+          showToast('Engine online · following CAN');
         } else {
-          // No real speed source yet: say what to press, and light up the chip that does it.
-          showToast('แตะ GPS ให้เสียงวิ่งตามความเร็วรถ · หรือกด REV ฟังเสียงลากรอบ', 5200);
-          startGpsNudge();
+          // No live drive stream yet: say what to press, and light up the chip that does it.
+          showToast('แตะ CAN ให้เสียงวิ่งตามรถ · หรือกด REV ฟังเสียงลากรอบ', 5200);
+          startCanNudge();
         }
       } else {
         audio.stop();
         state.engineOn = false;
         setAudioStatus(false);
         $('#btn-launch')?.classList.remove('is-armed', 'is-active');
-        stopGpsNudge();
+        stopCanNudge();
         showToast('Engine offline');
       }
     } catch (err) {
@@ -584,7 +609,7 @@ async function init() {
     tuneSheet?.setAttribute('aria-hidden', open ? 'false' : 'true');
   };
   // Developer mode: normal users get a clean sheet (Sound + Master). TRIPLE-TAP the
-  // settings button (3 quick taps within 700ms) to reveal sim / GPS / behaviour
+  // settings button (3 quick taps within 700ms) to reveal sim / CAN / behaviour
   // controls; a single tap just opens the sheet. Uses plain `click` so it survives the
   // Tesla browser (no pointer/contextmenu gesture to fight). Persisted per browser.
   const DEV_KEY = 'tas-dev-mode';
@@ -862,40 +887,30 @@ async function init() {
     },
   });
 
-  geo.onUpdate((payload) => {
-    const newSpeed = payload.speedKmh || 0;
-    // Accel from real GPS interval (not per-frame). Light clamp only.
-    const nowMs = performance.now();
-    const gdt = state.lastGeoMs ? (nowMs - state.lastGeoMs) / 1000 : 0;
-    // 0.06 s, not 0.12: the booster can now land fixes ~200 ms apart (and faster on a good
-    // receiver), and at 0.12 those intervals were discarded — the very fixes we added to be
-    // more responsive would have contributed no acceleration at all. Still wide enough to
-    // reject a sub-60 ms burst, and `a` stays clamped either way.
-    if (gdt > 0.06 && gdt < 4) {
-      let a = (newSpeed - state.geoSpeed) / gdt;
-      a = Math.max(-30, Math.min(30, a));
-      state.geoAccel = (state.geoAccel || 0) * 0.35 + a * 0.65;
+  canLink.onUpdate((payload) => {
+    setCanStatus(payload.status);
+    const urlState = $('#can-url-state');
+    if (urlState) {
+      urlState.textContent = payload.status === 'live' && payload.msgHz
+        ? `${payload.msgHz.toFixed(0)} Hz`
+        : payload.status;
     }
-    state.lastGeoMs = nowMs;
-    state.geoSpeed = newSpeed;
-    state.geoAccuracy = payload.accuracy;
-    state.fixHz = payload.fixHz;          // recorded by the drive trace: gdt is the suspect
-    setGpsStatus(payload.status);
-    // What the receiver actually gives us — the ceiling on how live the readout can be.
-    const summary = `${payload.speedSource || '—'} · ${
-      payload.fixHz ? `${payload.fixHz.toFixed(1)} Hz` : '—'
-    }`;
-    const srcEl = $('#tele-gps-src');
-    if (srcEl) srcEl.textContent = summary;
-    // Same figures on the drive screen, where they can be read while actually driving
-    const diagEl = $('#gps-diag');
-    if (diagEl) {
-      const acc = payload.accuracy != null ? ` · ±${Math.round(payload.accuracy)}m` : '';
-      diagEl.textContent = `${summary}${acc}`;
+    const srcEl = $('#tele-can-src');
+    if (srcEl) {
+      const hz = payload.msgHz ? `${payload.msgHz.toFixed(0)} Hz` : '—';
+      srcEl.textContent = `${payload.status} · ${hz}`;
     }
-    if (payload.status === 'denied') {
-      showToast('Location permission denied — use Simulation');
+    if (payload.status === 'error' && payload.error && !state._canErrToasted) {
+      state._canErrToasted = true;
+      const mixed = location.protocol === 'https:' && String(canLink.url).startsWith('ws:');
+      showToast(
+        mixed
+          ? 'หน้า https บล็อก ws:// · เปิดเว็บจากเซิร์ฟเวอร์ในรถ (http) แทน'
+          : 'CAN ไม่ต่อ · ตรวจที่อยู่เซิร์ฟเวอร์',
+        5200,
+      );
     }
+    if (payload.status === 'live') state._canErrToasted = false;
   });
 
   await selectProfile(state.profileId);
@@ -909,7 +924,19 @@ async function init() {
   }
 
   ticker.add((dt) => tick(dt));
-  setMode('sim', { silent: true }); // default sim so idle is easy to hear
+  // The local CAN server advertises itself at /__can/info. GitHub Pages 404s and we stay in Sim.
+  const q = new URLSearchParams(location.search);
+  let autoCan = q.get('ws') || q.get('can') === '1' || q.get('mode') === 'can';
+  if (!autoCan) {
+    try {
+      const res = await fetch('/__can/info', { cache: 'no-store' });
+      if (res.ok) {
+        const info = await res.json();
+        autoCan = !!(info && info.ok);
+      }
+    } catch (_) {}
+  }
+  setMode(autoCan ? 'can' : 'sim', { silent: true });
   finishBoot();
 
   // First-run coach marks, after the boot overlay clears
@@ -926,48 +953,52 @@ async function init() {
 }
 
 /**
- * GPS nudge — breathe a ring on the GPS chip when the engine is running but no real speed
- * source is on, because a first-timer otherwise hears idle only and thinks that is the app.
- * Self-terminating: stops on tap, on engine off, and on its own after NUDGE_MS. Stopping
- * REMOVES the class, so the animation is gone rather than merely invisible.
+ * Breathe a ring on the CAN chip when the engine is running but the drive stream
+ * is off, because a first-timer otherwise hears idle only and thinks that is the app.
+ * Self-terminating: stops on tap, on engine off, and on its own after NUDGE_MS.
  */
 const NUDGE_MS = 15000;
 let nudgeTimer = null;
 
-function stopGpsNudge() {
+function stopCanNudge() {
   if (nudgeTimer) {
     window.clearTimeout(nudgeTimer);
     nudgeTimer = null;
   }
-  $('#btn-gps')?.classList.remove('gps-nudge');
+  $('#btn-can')?.classList.remove('can-nudge');
 }
 
-function startGpsNudge() {
+function startCanNudge() {
   // Dev mode drives the sim slider on purpose — never nag there.
   if (document.body.classList.contains('dev-mode')) return;
-  stopGpsNudge();
-  $('#btn-gps')?.classList.add('gps-nudge');
-  nudgeTimer = window.setTimeout(stopGpsNudge, NUDGE_MS);
+  stopCanNudge();
+  $('#btn-can')?.classList.add('can-nudge');
+  nudgeTimer = window.setTimeout(stopCanNudge, NUDGE_MS);
+}
+
+function readCanUrl() {
+  const typed = $('#can-url')?.value.trim();
+  return typed || defaultCanUrl();
 }
 
 function setMode(mode, { silent = false } = {}) {
   state.mode = mode;
   setModeUI(mode);
-  lastPhysicsWall = 0; // reset wall clock on mode change
+  lastPhysicsWall = 0;
 
-  if (mode === 'geo') {
-    stopGpsNudge(); // they found it
-    if (geo.supported) {
-      geo.start();
-      if (!silent) showToast('Geolocation · real GPS speed');
-    } else {
-      setGpsStatus('error');
-      if (!silent) showToast('GPS unavailable — use Simulation');
+  if (mode === 'can') {
+    stopCanNudge();
+    driveMap.reset();
+    const url = readCanUrl();
+    const mixed = location.protocol === 'https:' && url.startsWith('ws:');
+    if (mixed && !silent) {
+      showToast('หน้า https บล็อก ws:// · เปิดเว็บจากเซิร์ฟเวอร์ในรถ (http) แทน', 5600);
     }
+    canLink.start(url);
+    if (!silent && !mixed) showToast(`CAN · ${url}`);
   } else {
-    geo.stop();
-    setGpsStatus('off');
-    // Keep vehicle speed; sheet slider is the demand target
+    canLink.stop();
+    setCanStatus('off');
     physics.setTarget(state.targetSpeed);
     if (!silent) {
       showToast(`Simulation · ±${SIM_RATE.maxDeltaKmhPerSec} km/h/s toward slider`);
@@ -978,20 +1009,27 @@ function setMode(mode, { silent = false } = {}) {
 function tick(dt) {
   const now = performance.now();
 
-  if (state.mode === 'geo') {
-    // Ramp to the newest fix fast. Fixes land ~1 Hz, so this only exists to turn each step
-    // into a short glide instead of a jump — at lambda 6 it was still catching up when the
-    // NEXT fix arrived, which is latency we were adding on top of the GPS's own.
-    state.activeSpeed += (state.geoSpeed - state.activeSpeed) * Math.min(1, dt * 12);
-    const staleSec = (now - (state.lastGeoMs || 0)) / 1000;
-    if (staleSec > 1.5) state.geoAccel = (state.geoAccel || 0) * Math.max(0, 1 - dt * 2);
-    state.accelKmhps += ((state.geoAccel || 0) - state.accelKmhps) * Math.min(1, dt * 5);
-    // Small deadband only (not wide — that made load feel sticky/laggy)
-    let aRaw = state.accelKmhps || 0;
-    if (Math.abs(aRaw) < 1.2) aRaw = 0;
-    const aN = aRaw / SIM_RATE.maxDeltaKmhPerSec;
-    state.throttle = clamp(aN, 0, 1);
-    state.brake = aN < -0.04 ? clamp(-aN, 0, 1) : 0;
+  if (state.mode === 'can') {
+    canLink.poll(now);
+    if (!canLink.isFresh(now)) {
+      // Quiet socket: ease to idle instead of holding the last pull.
+      const ks = Math.min(1, dt * CAN_IDLE_SPEED);
+      const kl = Math.min(1, dt * CAN_IDLE_LOAD);
+      state.activeSpeed += (0 - state.activeSpeed) * ks;
+      state.accelKmhps += (0 - state.accelKmhps) * kl;
+      state.throttle += (0 - state.throttle) * kl;
+      state.brake += (0 - state.brake) * kl;
+      state.regen += (0 - state.regen) * kl;
+      if (state.activeSpeed < 0.35) state.activeSpeed = 0;
+    } else {
+      const drive = driveMap.map(canLink.sample, now);
+      state.activeSpeed = drive.speedKmh;
+      state.accelKmhps = drive.accelKmhps;
+      state.throttle = drive.throttle;
+      state.brake = drive.brake;
+      state.regen = drive.regen;
+      state.rpmProxy = drive.rpmProxy;
+    }
     physics.vehicleSpeed = state.activeSpeed;
   } else {
     // Simulation: always use wall-clock so 0→100 ≈ 100/33 ≈ 3.0s even if FPS is low
@@ -1009,16 +1047,9 @@ function tick(dt) {
     state.brake = p.brake;
   }
 
-  // Acceleration is measured over the interval in which the speed actually changed — the gap
-  // between two GPS fixes (geo) or the physics step (sim) — NOT as a per-frame derivative of
-  // the displayed speed. That derivative looked equivalent but is not: fixes land ~1 Hz, so
-  // activeSpeed ramps to each one and then sits flat, making d/dt a brief spike followed by
-  // ~zero. Load then swung 0.14<->0.80 every second, i.e. the engine surged and sagged instead
-  // of pulling. Measured over the fix interval the value persists, as it physically should.
-  // (The reason this path once read ~0 was maximumAge:500 replaying the same fix; that is gone
-  // now — maximumAge is 0 and identical timestamps are deduped before they ever reach here.)
-  // The dev pedal, when it is open, outranks the throttle physics inferred
-  // from the speed trace — see throttleOverride().
+  // CAN acceleration comes from the snapshot (pedal, measured accel, regen), not from
+  // differentiating the displayed speed. Sim still uses the physics step.
+  // The dev pedal, when it is open, outranks either source — see throttleOverride().
   const pedalWants = window.TAS.manual && window.TAS.manual.throttleOverride
     ? window.TAS.manual.throttleOverride()
     : null;
@@ -1030,6 +1061,8 @@ function tick(dt) {
     throttle: state.throttle,
     brake: state.brake,
     accelKmhps: state.accelKmhps,
+    // Telemetry. The synth derives RPM from speed; it does not read this.
+    rpmProxy: state.rpmProxy,
   });
   // Audio params update on the engine's own 50 Hz clock (see AudioEngine),
   // so sound stays smooth even when Tesla Browser rAF drops to 20–30 fps.
@@ -1037,8 +1070,18 @@ function tick(dt) {
   samplePerf();
 
   speedUI.setTelemetry({
-    accuracy: state.mode === 'geo' ? state.geoAccuracy : null,
+    link: state.mode === 'can' ? canLink.status : 'sim',
+    proxy: state.mode === 'can' ? state.rpmProxy : null,
   });
+  const diagEl = $('#can-diag');
+  if (diagEl) {
+    if (state.mode !== 'can') diagEl.textContent = 'sim';
+    else {
+      const hz = canLink.msgHz ? `${canLink.msgHz.toFixed(0)} Hz` : '—';
+      const proxy = state.rpmProxy != null ? ` · proxy ${Math.round(state.rpmProxy)}` : '';
+      diagEl.textContent = `${canLink.status} · ${hz}${proxy}`;
+    }
+  }
   // Big number follows actual vehicle speed (not fader yank)
   speedUI.target = state.activeSpeed;
   speedUI.step(dt);
@@ -1059,13 +1102,9 @@ window.TAS = {
   perf,
   driveLock,
   updateDriveLock,
-  /**
-   * TAS.gpsBoost(false) stops the between-fix poll; true starts it again.
-   * Returns the state. The poll is the only thing that runs with GPS and not
-   * in the simulator, which is the line the reported judder follows.
-   */
-  gpsBoost: (on) => geo.setBoost(on),
-  gpsFixHz: () => geo.fixHz || 0,
+  can: canLink,
+  canHz: () => canLink.msgHz || 0,
+  canUrl: () => canLink.url,
   onboard: () => startOnboarding({ force: true }),
   /**
    * TAS.isolate('engine' | 'noise' | 'all') — hear the two things that repeat

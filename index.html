@@ -9,20 +9,20 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="apple-touch-icon" href="favicon.svg" />
   <title>Tesla Active Sound — Engine Sound for Your EV</title>
-  <meta name="description" content="Turn your Tesla into a combustion car — a realistic engine sound played through the cabin speakers, revving in real time with your GPS speed. No install: open the link and drive." />
+  <meta name="description" content="Turn your Tesla into a combustion car — a realistic engine sound played through the cabin speakers, revving in real time with CAN bus speed. No install: open the link and drive." />
   <meta name="author" content="PreeMak03" />
   <link rel="canonical" href="https://preemak03.github.io/" />
   <!-- Open Graph (link previews) -->
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Tesla Active Sound" />
   <meta property="og:title" content="Tesla Active Sound — Engine Sound for Your EV" />
-  <meta property="og:description" content="Turn your Tesla into a combustion car — a realistic engine sound through the cabin speakers, revving in real time with your GPS speed." />
+  <meta property="og:description" content="Turn your Tesla into a combustion car — a realistic engine sound through the cabin speakers, revving in real time with CAN bus speed." />
   <meta property="og:url" content="https://preemak03.github.io/" />
   <meta property="og:image" content="https://preemak03.github.io/favicon.svg" />
   <!-- Twitter -->
   <meta name="twitter:card" content="summary" />
   <meta name="twitter:title" content="Tesla Active Sound — Engine Sound for Your EV" />
-  <meta name="twitter:description" content="Turn your Tesla into a combustion car — engine sound through the cabin speakers, revving with real GPS speed." />
+  <meta name="twitter:description" content="Turn your Tesla into a combustion car — engine sound through the cabin speakers, revving with CAN bus speed." />
   <meta name="twitter:image" content="https://preemak03.github.io/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -37,7 +37,7 @@
       <div class="bg-gradient"></div>
     </div>
 
-    <!-- Top bar: brand left · GPS + theme right -->
+    <!-- Top bar: brand left · CAN + theme right -->
     <header class="top-bar-clean">
       <div class="brand-mini">
         <svg viewBox="0 0 40 40" class="brand-svg" aria-hidden="true">
@@ -59,9 +59,9 @@
             <path d="M7.5 3.2c0 1-1 1.2-1 2.2M10.5 3.2c0 1-1 1.2-1 2.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
-        <button type="button" class="chip-btn" id="btn-gps" aria-pressed="false" title="GPS speed on/off">
-          <span class="pill-dot pill-dot--gps" id="gps-status-dot"></span>
-          <span id="gps-status-label">GPS Off</span>
+        <button type="button" class="chip-btn" id="btn-can" aria-pressed="false" title="CAN bus speed on/off">
+          <span class="pill-dot pill-dot--can" id="can-status-dot"></span>
+          <span id="can-status-label">CAN Off</span>
         </button>
         <button type="button" class="chip-btn" id="btn-theme" aria-label="Toggle dark/bright mode">
           <span class="theme-toggle-icon" id="theme-icon" aria-hidden="true">☾</span>
@@ -115,9 +115,9 @@
                  nothing but the label), but it is diagnostic furniture and the drive
                  screen is better without it. -->
             <div class="state-chip dev-only" id="drive-state" data-state="idle">Idle</div>
-            <!-- Dev-only GPS telemetry. Lives on the drive screen ON PURPOSE: the tune sheet is
+            <!-- Dev-only CAN telemetry. Lives on the drive screen ON PURPOSE: the tune sheet is
                  locked out while moving, and this is exactly what needs reading while moving. -->
-            <div class="gps-diag dev-only" id="gps-diag">—</div>
+            <div class="can-diag dev-only" id="can-diag">—</div>
           </div>
         </div>
       </section>
@@ -192,7 +192,7 @@
       </div>
       <div class="scope-chip-row dev-only">
         <span class="scope-chip" id="engine-scope-chip" title="Which synthesis engine is live">Classic tone</span>
-        <span class="scope-hint" id="tune-scope-hint">Bass/Edge = this card · Master/GPS = app</span>
+        <span class="scope-hint" id="tune-scope-hint">Bass/Edge = this card · Master/CAN = app</span>
       </div>
 
       <!-- SOUND PROFILE — follows the selected car card -->
@@ -246,6 +246,14 @@
           </div>
         </div>
 
+        <div class="slider-group can-url-group">
+          <label class="slider-label" for="can-url">
+            <span>CAN server</span>
+            <span class="slider-readout" id="can-url-state">—</span>
+          </label>
+          <input id="can-url" class="can-url-input" type="url" spellcheck="false" autocomplete="off" inputmode="url" placeholder="ws://192.168.1.20:8787" />
+        </div>
+
         <!-- Developer / simulation controls — revealed by long-press on the sheet title -->
         <div class="dev-only dev-block">
           <div class="toggle-row">
@@ -273,12 +281,16 @@
       </div>
 
       <div class="sheet-meta dev-only">
-        <span>GPS Accuracy</span>
+        <span>CAN link</span>
         <span id="tele-accuracy">—</span>
       </div>
       <div class="sheet-meta dev-only">
-        <span>GPS Source · Rate</span>
-        <span id="tele-gps-src">—</span>
+        <span>CAN status · rate</span>
+        <span id="tele-can-src">—</span>
+      </div>
+      <div class="sheet-meta dev-only">
+        <span>RPM proxy</span>
+        <span id="tele-rpm-proxy">—</span>
       </div>
 
       <div class="sheet-meta sheet-credit">

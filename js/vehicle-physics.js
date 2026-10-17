@@ -2,7 +2,7 @@
  * Simulation speed limiter
  *
  * Hard rate limit: ±33 km/h per second toward fader demand.
- * GPS mode does NOT use this — it tracks raw GPS as often as the browser reports.
+ * CAN mode does NOT use this — it tracks the bus sample as often as the socket reports.
  */
 
 import { clamp } from './animations.js';

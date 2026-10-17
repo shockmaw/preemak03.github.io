@@ -97,7 +97,7 @@ TAS รับสัญญาณจากรถ **เส้นเดียว**: 
 |---|---|---|
 | `js/gearbox.js` | `GEAR_VMAX` `UP_AT` `DOWN_AT` | ทุกเครื่องยนต์ที่มีเกียร์ |
 | `js/vehicle-physics.js` | `accelKmhps` | ทุกเครื่องยนต์ (เคยเป็นบั๊กระดับแอป) |
-| `js/geolocation.js` | deadband จอดนิ่ง | ทุกเครื่องยนต์ |
+| `js/can-map.js` | `standstillKmh`, `regenAccelKmhps`, `throttleFromAccelKmhps` | ทุกเครื่องยนต์ |
 
 > **กฎ:** แก้สามไฟล์นี้ = ต้องรัน bench **ทุกโปรไฟล์** ไม่ใช่ตัวที่กำลังแก้
 

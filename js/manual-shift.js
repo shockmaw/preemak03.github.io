@@ -178,7 +178,7 @@ function pedalTick(now) {
   const dt = pedalLast ? Math.min(0.1, (now - pedalLast) / 1000) : 0;
   pedalLast = now;
   if (!dt) return;
-  if (sim.state.mode !== 'sim') return;      // GPS owns the speed when driving
+  if (sim.state.mode !== 'sim') return;      // CAN owns the speed when driving
 
   const rate = sim.rate || 33;
   let v = sim.state.targetSpeed || 0;

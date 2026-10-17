@@ -161,13 +161,14 @@ export function startDevInput({ getState } = {}) {
     // everything else in this engine is derived from speed over time, so if
     // this line is wrong nothing downstream can be right.
     const s = (typeof getState === 'function' && getState()) || {};
+    const hz = window.TAS && typeof window.TAS.canHz === 'function' ? window.TAS.canHz() : 0;
     driveEl.textContent = [
-      `GPS ${(s.geoSpeed ?? 0).toFixed(1)}`,
-      `ใช้จริง ${(s.activeSpeed ?? 0).toFixed(1)} km/h`,
+      `${s.mode || 'sim'} ${(s.activeSpeed ?? 0).toFixed(1)} km/h`,
       `${(s.accelKmhps ?? 0) >= 0 ? '+' : ''}${(s.accelKmhps ?? 0).toFixed(2)} km/h/s`,
-      `${(s.fixHz ?? 0).toFixed(1)} Hz`,
-      `±${Math.round(s.geoAccuracy ?? 0)} m`,
-    ].join('  ·  ');
+      `thr ${(s.throttle ?? 0).toFixed(2)}`,
+      `regen ${(s.regen ?? 0).toFixed(2)}`,
+      hz ? `${hz.toFixed(0)} Hz` : '',
+    ].filter(Boolean).join('  ·  ');
   }
 
   function loop(t) {

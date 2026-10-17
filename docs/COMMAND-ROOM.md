@@ -56,7 +56,7 @@ Edit **every** Classic AudioEngine variable (`engine` / `tone` / `mix` / `dynami
 | Profile (per card) | App system (global) |
 |--------------------|---------------------|
 | engine / tone / mix / dynamics | Master slider |
-| Dyn curve, shiftDuck, dynDb | GPS smoothing / deadband |
+| Dyn curve, shiftDuck, dynDb | CAN link / standstill / stale-to-idle |
 | waveguide mix in tone | Online carousel (`live-set`) |
 
 ### Classic tab — Listen + Launch Rev

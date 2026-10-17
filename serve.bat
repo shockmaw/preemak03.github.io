@@ -1,7 +1,9 @@
 @echo off
 cd /d "%~dp0"
 echo.
-echo  Tesla Active Sound — local server
+echo  Tesla Active Sound — static server (Sim only, no CAN)
+echo  For CAN / mock drive:  node can/server.mjs
+echo  then open http://localhost:8787
 echo  Open on this PC or Tesla Browser:
 echo.
 where py >nul 2>nul && (

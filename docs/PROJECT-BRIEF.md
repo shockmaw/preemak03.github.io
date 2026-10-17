@@ -15,7 +15,7 @@
 ## 0. TL;DR
 
 **Tesla Active Sound (TAS)** is a browser web app that makes an electric car sound like a
-combustion car. It synthesizes engine audio live from the car's **GPS speed** and plays it
+combustion car. It synthesizes engine audio live from the car's **CAN speed** (or the Sim fader) and plays it
 through the cabin speakers. It runs in the Tesla in-car browser (and on phones) with **no
 install, no account, no build step, no dependencies, no audio files** — every sound is
 generated in real time with the Web Audio API.
@@ -38,8 +38,9 @@ A third, experimental engine (**order-synth**) exists on the `order-synth` git b
 - **URL:** `https://preemak03.github.io/` (GitHub Pages **user site**, repo
   `PreeMak03/preemak03.github.io`, branch `main`). *(The `README.md` still prints an older
   `/TeslaActiveSound/` path — that is stale.)*
-- **User flow:** open link → **Start** (push-to-start button) → optionally tap **GPS** →
-  drive. Sound follows real speed. **REV** does a scripted launch so it can be demoed parked.
+- **User flow:** open the local CAN server in the car browser → **Start** → the CAN chip
+  follows the bus (or tap it to fall back to Sim). **REV** does a scripted launch so it can be demoed parked.
+  Setup: [`docs/CAN.md`](CAN.md).
 - **Owner:** PreeMak03 (Thai). Repo is public but `LICENSE` is **all rights reserved** —
   no forking/derivatives permitted without permission.
 - **Monetisation:** none. A coffee/PromptPay donate QR and a feedback form, both optional.
@@ -60,17 +61,19 @@ A third, experimental engine (**order-synth**) exists on the `order-synth` git b
 ## 2. Runtime architecture (what runs in the car)
 
 ```
- GPS receiver (or Sim slider)
-        │  navigator.geolocation.watchPosition + a rate booster
+ CAN bus → can/server.mjs  (or the mock source)
+        │  WebSocket JSON: speed, accel, pedal, regen, motorRpm
         ▼
- js/geolocation.js ── speedKmh, accuracy, fixHz, speedSource ──┐
+ js/can-link.js ── snapshot, reconnect, stale timer ────────────┐
         │                                                       │
         ▼                                                       │
+ js/can-map.js ── speedKmh, accelKmhps, throttle, brake ────────┤
+        │            rpmProxy is telemetry only (not synth RPM) │
+        ▼                                                       │
  js/app.js  tick()  (requestAnimationFrame)                     │
-   • state.activeSpeed  ← ramp toward the newest fix            │
-   • state.geoAccel     ← Δspeed / Δ(fix interval)   ★          │
-   • state.accelKmhps   ← smoothed geoAccel (geo) or physics (sim)
-   • audio.setSpeed(speed, { throttle, brake, accelKmhps })     │
+   • fresh sample → those four inputs                          │
+   • quiet socket → ease speed and load toward idle            │
+   • audio.setSpeed(speed, { throttle, brake, accelKmhps })    │
         │                                                       │
         ▼                                                       │
  js/audio-engine.js  update(dt)  (its OWN setInterval @ 50 Hz)  │
@@ -92,7 +95,7 @@ A third, experimental engine (**order-synth**) exists on the `order-synth` git b
 ### Refresh rates (all three are deliberate)
 | Stage | Rate | Why |
 |---|---|---|
-| GPS fixes | whatever the receiver gives (~1 Hz typical) | hardware limit; a booster polls for more, see §3 |
+| CAN snapshots | 50 Hz default from `can/server.mjs` | coalesced latest-value; the bus itself is faster |
 | `app.js tick()` | `requestAnimationFrame` (~60 fps, drops on the car MCU) | display + input plumbing only |
 | `audio-engine.update()` | **`setInterval(…, 20)` = 50 Hz, independent of rAF** | so audio stays smooth when the car's rAF drops to 20–30 fps |
 | AudioParam pushes | every 2nd engine tick = **25 Hz**, with an epsilon guard | `setTargetAtTime` spam is what the Tesla MCU audio thread hates |
@@ -104,9 +107,13 @@ than wall time and a small lag accumulates.)
 
 ---
 
-## 3. Stage 1 — GPS input (`js/geolocation.js`, 207 lines)
+## 3. Stage 1 — GPS input (removed)
 
-`GeolocationService` wraps `watchPosition` and emits `{ speedKmh, accuracy, status, lastFix,
+**The page no longer calls the Geolocation API.** Drive input is the CAN WebSocket in
+`js/can-link.js` plus `js/can-map.js`. See [`docs/CAN.md`](CAN.md). The notes below are
+history: they explain why the old GPS path smoothed the way it did. Do not restore that file.
+
+`GeolocationService` wrapped `watchPosition` and emitted `{ speedKmh, accuracy, status, lastFix,
 fixHz, speedSource }` to subscribers.
 
 Key behaviours, each of which exists for a specific reason:
@@ -366,8 +373,8 @@ redline 6500), compiled hash `fb7a986a`.
 1. **Node simulation of the model** — construct `AudioEngine`, set a profile, call
    `_updateRpmGear(dt)` directly. No audio nodes needed; proves rpm/gear logic.
 2. **`OfflineAudioContext` render** — measure peak/RMS/brightness to compare timbres objectively.
-3. **Stub `navigator.geolocation`** in the live page and read `window.TAS` — the only way to
-   test the GPS path without driving.
+3. **Mock CAN server** — `node can/server.mjs`, open the site, read `window.TAS.state` and
+   `TAS.audio.rpm`. No car and no geolocation stub. See `node can/self-check.mjs`.
 4. **Module HTTP cache is sticky.** Bust it with `fetch(url, {cache:'reload'})` then reload, or
    dev changes appear to do nothing.
 
@@ -375,7 +382,7 @@ redline 6500), compiled hash `fb7a986a`.
 
 ## 10. UI structure (`index.html` + `css/main.css`)
 
-- **Top bar:** brand + version · donate chip (coffee) · GPS chip · theme toggle.
+- **Top bar:** brand + version · donate chip (coffee) · CAN chip · theme toggle.
 - **Drive stage:** big speed ring, rpm/gear line, drive-state chip, vertical acceleration tube.
   A dev-only GPS telemetry line (`doppler · 4.2 Hz · ±5m`) sits here on purpose — the tune sheet
   is locked while moving, and those numbers only mean anything while moving.
