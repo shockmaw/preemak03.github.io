@@ -133,7 +133,11 @@ export function startDevTrace(getAudio, state, physics) {
     const a = getAudio && getAudio();
     if (!a || !a.running) return;
     t[i] = performance.now() - t0;
-    geoSpeed[i] = state.geoSpeed || 0;
+    // gs in the dump is the raw CAN speed (or the sim demand), not a GPS fix.
+    const rawIn = state.mode === 'can' && window.TAS && window.TAS.can && window.TAS.can.sample
+      ? window.TAS.can.sample.speedKmh
+      : state.targetSpeed;
+    geoSpeed[i] = rawIn || 0;
     active[i] = state.activeSpeed || 0;
     accel[i] = state.accelKmhps || 0;
     rpm[i] = a.rpm || 0;
@@ -141,8 +145,8 @@ export function startDevTrace(getAudio, state, physics) {
     dyn[i] = a._nodes && a._nodes.dynGain ? a._nodes.dynGain.gain.value
       : (a.dynGain ? a.dynGain.gain.value : 0);
     pitch[i] = played(a);
-    fixHz[i] = state.fixHz || 0;
-    acc[i] = state.geoAccuracy || 0;
+    fixHz[i] = window.TAS && typeof window.TAS.canHz === 'function' ? window.TAS.canHz() : 0;
+    acc[i] = state.rpmProxy || 0;
     // The control values are what the engine INTENDED. This is what came out.
     // Judder that lives between control ticks is invisible to everything else
     // here — the owner's three traces came back with 0 gain jumps while he was

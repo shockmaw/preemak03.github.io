@@ -63,10 +63,10 @@
 | Profile (ต่อการ์ด) | App system (ทั้งแอป) |
 |--------------------|----------------------|
 | engine / tone / mix / dynamics | Master volume slider |
-| Dyn curve, dynDb, shiftDuck, gearScale | GPS smooth / deadband |
+| Dyn curve, dynDb, shiftDuck, gearScale | CAN link / standstill / stale-to-idle |
 | waveguide ใน tone | Online carousel (`live-set.json`) |
 
-อย่ายัด GPS smoothing เข้า tone  
+อย่ายัด CAN smoothing เข้า tone  
 อย่ายัด “แก้กระตุกบนรถ” เป็น hardcode ใน dyn ที่ทับทุกโปรไฟล์โดยไม่ document เป็น field
 
 ---
@@ -91,7 +91,7 @@ Deploy = โค้ด + JSON + runtime
 เมื่อมีบั๊กบนรถ (กระตุก / ดังผิด):
 
 1. ตรวจ **โปรไฟล์** ผ่าน validate หรือยัง  
-2. ตรวจ **GPS / app path** (ถ้าเกี่ยวกับ speed)  
+2. ตรวจ **CAN / app path** (ถ้าเกี่ยวกับ speed)  
 3. ถ้าต้องพารามิเตอร์ใหม่ → **เพิ่ม field ใน dynamics/tone + limits + fields.json**  
 4. **ห้าม** ใส่ clamp ลับใน `update()` ที่ทำให้ “ค่าใน JSON ≠ เสียงที่ได้”
 

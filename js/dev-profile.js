@@ -38,7 +38,8 @@ const NAMES = [
   [/manual-shift/, 'manual-shift (pedal)'],
   [/\bui\.js/, 'ui.js'],
   [/app\.js/, 'app.js (frame loop)'],
-  [/geolocation/, 'geolocation'],
+  [/can-link/, 'can-link'],
+  [/can-map/, 'can-map'],
   [/vehicle-physics/, 'vehicle-physics'],
 ];
 

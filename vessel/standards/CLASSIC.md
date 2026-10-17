@@ -16,7 +16,7 @@ Editable ship profiles for the **classic** procedural engine (`js/audio-engine.j
 | 1 | จูนจบที่โปรไฟล์ | SoT = `assets/classic/{id}.classic.json` |
 | 2 | Engine = pure player | ห้าม sanitize/ทับค่า author ใน `update()` |
 | 3 | Validate-at-save | ค่าพังตายตอน Save ไม่ใช่ตอน Drive |
-| 4 | App ≠ Profile | Master/GPS = แอป · tone/dynamics = การ์ด |
+| 4 | App ≠ Profile | Master/CAN = แอป · tone/dynamics = การ์ด |
 | 5 | Ship ครบ | ทุก import production ต้อง Deploy จริง |
 | 6 | ห้ามแก้รถด้วยการพังสัญญา | พารามใหม่ = field ใน JSON ไม่ใช่ clamp ลับ |
 

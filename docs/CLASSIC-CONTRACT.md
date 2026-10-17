@@ -42,7 +42,7 @@
                            Web Audio
 ```
 
-**App system (นอกโปรไฟล์):** Master slider · GPS smoothing · live-set carousel
+**App system (นอกโปรไฟล์):** Master slider · CAN link / stale-to-idle · live-set carousel
 
 ---
 
@@ -95,7 +95,7 @@ fs.writeFileSync(path, JSON.stringify(doc));
 | `js/audio-engine.js` | เล่นตาม profile + physics input | แก้บุคลิกเสียงลับ |
 | `js/dynamic-volume.js` | สูตรจากพารามิเตอร์ที่ส่งเข้า | default ทับ author |
 | `js/profiles.js` | bootstrap + loadClassicStandards | SoT แทน JSON |
-| `js/app.js` / geolocation | GPS, master, UI | เปลี่ยน tone โปรไฟล์ |
+| `js/app.js` / `can-link.js` / `can-map.js` | CAN, master, UI | เปลี่ยน tone โปรไฟล์ |
 | CommandRoom / lab-serve | edit + validate + deploy | ข้าม validate |
 
 ---

@@ -1,6 +1,6 @@
 /**
  * UI binding helpers — clean drive UI
- * Carousel profiles, push-to-start, GPS chip, tune sheet sync
+ * Carousel profiles, push-to-start, CAN chip, tune sheet sync
  */
 
 import { clamp } from './animations.js';
@@ -234,13 +234,13 @@ export class SpeedDisplay {
     }
   }
 
-  setTelemetry({ accuracy }) {
+  setTelemetry({ link, proxy } = {}) {
     if (this.teleAccuracy) {
-      if (accuracy != null && !Number.isNaN(accuracy)) {
-        this.teleAccuracy.textContent = `±${Math.round(accuracy)} m`;
-      } else {
-        this.teleAccuracy.textContent = '—';
-      }
+      this.teleAccuracy.textContent = link || '—';
+    }
+    const proxyEl = document.getElementById('tele-rpm-proxy');
+    if (proxyEl) {
+      proxyEl.textContent = proxy != null && !Number.isNaN(proxy) ? `${Math.round(proxy)} rpm` : '—';
     }
   }
 
@@ -293,12 +293,12 @@ export function bindSliders(handlers) {
 }
 
 export function setModeUI(mode) {
-  const gps = $('#btn-gps');
-  if (gps) {
-    gps.classList.toggle('is-on', mode === 'geo');
-    gps.setAttribute('aria-pressed', mode === 'geo' ? 'true' : 'false');
+  const can = $('#btn-can');
+  if (can) {
+    can.classList.toggle('is-on', mode === 'can');
+    can.setAttribute('aria-pressed', mode === 'can' ? 'true' : 'false');
   }
-  // Sim demand slider is inert while GPS drives the speed
+  // Sim demand slider is inert while the CAN stream drives the speed
   $('#sim-group')?.classList.toggle('is-inert', mode !== 'sim');
 }
 
@@ -311,31 +311,31 @@ export function setAudioStatus(running) {
   if (status) status.textContent = running ? 'Engine Live' : 'Ready';
 }
 
-export function setGpsStatus(status) {
-  const dot = $('#gps-status-dot');
-  const label = $('#gps-status-label');
+export function setCanStatus(status) {
+  const dot = $('#can-status-dot');
+  const label = $('#can-status-label');
   if (!dot || !label) return;
   dot.classList.remove('is-live', 'is-warn', 'is-off');
   switch (status) {
     case 'live':
       dot.classList.add('is-live');
-      label.textContent = 'GPS Live';
+      label.textContent = 'CAN Live';
       break;
-    case 'pending':
+    case 'connecting':
       dot.classList.add('is-warn');
-      label.textContent = 'GPS Seeking…';
+      label.textContent = 'CAN Connecting…';
       break;
-    case 'denied':
+    case 'stale':
       dot.classList.add('is-warn');
-      label.textContent = 'GPS Denied';
+      label.textContent = 'CAN Stale';
       break;
     case 'error':
       dot.classList.add('is-warn');
-      label.textContent = 'GPS Error';
+      label.textContent = 'CAN Error';
       break;
     default:
       dot.classList.add('is-off');
-      label.textContent = 'GPS Off';
+      label.textContent = 'CAN Off';
   }
 }
 

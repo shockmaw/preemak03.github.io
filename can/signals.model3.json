@@ -1,0 +1,107 @@
+{
+  "name": "model3-community",
+  "verified": false,
+  "warning": "UNVERIFIED. Layouts are copied from the community onyx-m2 tesla_model3.dbc (DI_speed 599, DI_torque 264, RCM_inertial2 273) and tesla_model3_vehicle.dbc (DI_systemStatus 280). They have not been confirmed on this car. Model S tesla_can.dbc uses different IDs for similarly named signals — do not mix the two files. Edit this JSON; do not hardcode IDs in the server.",
+  "sources": [
+    "https://github.com/onyx-m2/onyx-m2-dbc/blob/master/tesla_model3.dbc",
+    "https://github.com/BMW-E8x-E9x/opendbc/blob/master/opendbc/dbc/tesla_model3_vehicle.dbc"
+  ],
+  "adapter": {
+    "name": "unspecified",
+    "note": "The in-car transmitter was referred to as \"tita\" / \"Tida\" (spelling unclear). No vendor protocol is assumed. Frames arrive from SocketCAN, a USB serial adapter that emits SLCAN or 'ID HEX' lines, or any line stream. Add a parser in can/parse.mjs and select it with --parser if the device speaks something else."
+  },
+  "signals": [
+    {
+      "name": "speedKmh",
+      "frame": 599,
+      "startBit": 12,
+      "length": 12,
+      "factor": 0.08,
+      "offset": -40,
+      "signed": false,
+      "endian": "intel",
+      "unit": "km/h",
+      "dbc": "DI_vehicleSpeed",
+      "verified": false
+    },
+    {
+      "name": "pedalPct",
+      "frame": 280,
+      "startBit": 32,
+      "length": 8,
+      "factor": 0.4,
+      "offset": 0,
+      "signed": false,
+      "endian": "intel",
+      "unit": "%",
+      "invalidRaw": [255],
+      "dbc": "DI_accelPedalPos",
+      "verified": false
+    },
+    {
+      "name": "brakeState",
+      "frame": 280,
+      "startBit": 19,
+      "length": 2,
+      "factor": 1,
+      "offset": 0,
+      "signed": false,
+      "endian": "intel",
+      "unit": "enum",
+      "dbc": "DI_brakePedalState (0 off, 1 on, 2 invalid)",
+      "verified": false
+    },
+    {
+      "name": "regenLight",
+      "frame": 280,
+      "startBit": 26,
+      "length": 1,
+      "factor": 1,
+      "offset": 0,
+      "signed": false,
+      "endian": "intel",
+      "unit": "bool",
+      "dbc": "DI_regenLight",
+      "verified": false
+    },
+    {
+      "name": "motorRpm",
+      "frame": 264,
+      "startBit": 40,
+      "length": 16,
+      "factor": 0.1,
+      "offset": 0,
+      "signed": true,
+      "endian": "intel",
+      "unit": "RPM",
+      "dbc": "DI_axleSpeed — axle RPM after the reduction, not motor-shaft RPM. Mapping treats it that way unless CAN_MAP.axleIsMotorShaft is set.",
+      "verified": false
+    },
+    {
+      "name": "torqueNm",
+      "frame": 264,
+      "startBit": 27,
+      "length": 13,
+      "factor": 2,
+      "offset": 0,
+      "signed": true,
+      "endian": "intel",
+      "unit": "Nm",
+      "dbc": "DI_torqueActual — negative is regen",
+      "verified": false
+    },
+    {
+      "name": "accelMps2",
+      "frame": 273,
+      "startBit": 0,
+      "length": 16,
+      "factor": 0.00125,
+      "offset": 0,
+      "signed": true,
+      "endian": "intel",
+      "unit": "m/s^2",
+      "dbc": "RCM_longitudinalAccel",
+      "verified": false
+    }
+  ]
+}
